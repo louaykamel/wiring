@@ -11,7 +11,7 @@ exclude = [".github/**/*"]
 
 [dependencies]
 tokio = { version = "1.35.1", features = ["sync", "rt", "net", "io-util", "macros"] }
-futures = {version = "*"}
+futures = {version = "0.3"}
 
 rand ="0.8"
 url = "2.5"
