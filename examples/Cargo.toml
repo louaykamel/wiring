@@ -1,0 +1,13 @@
+[package]
+name = "examples"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dev-dependencies]
+wiring = {path = "../wiring"}
+tokio = {version = "1.0", features = ["full"]}
+
+[[example]]
+name = "hello-world"
+path = "hello_world.rs"

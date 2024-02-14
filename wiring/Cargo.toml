@@ -1,0 +1,18 @@
+[package]
+name = "wiring"
+version = "0.1.0"
+edition = "2021"
+authors = ["Louay Kamel"]
+repository = "https://github.com/louaykamel/wiring"
+description = "An async binary serialization framework with channels support"
+keywords = ["wiring", "async", "serialization", "rpc"]
+exclude = [".github/**/*"]
+
+[dependencies]
+tokio = { version = "1.35.1", features = ["sync", "rt", "net", "io-util", "macros"] }
+futures = {version = "*"}
+
+rand ="0.8"
+url = "2.5"
+pin-project = "1.1"
+tokio-stream = {version = "0.1", features = ["sync"]}
