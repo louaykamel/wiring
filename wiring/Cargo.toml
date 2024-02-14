@@ -3,6 +3,7 @@ name = "wiring"
 version = "0.1.0"
 edition = "2021"
 authors = ["Louay Kamel"]
+license-file = "LICENSE"
 repository = "https://github.com/louaykamel/wiring"
 description = "An async binary serialization framework with channels support"
 keywords = ["wiring", "async", "serialization", "rpc"]
