@@ -3,7 +3,7 @@ use tokio::{self, sync::oneshot};
 use self::wire::{HandleWire, WireConfig, WireInfo, WireStream};
 
 use super::*;
-/// Listener server which is axum
+/// Listener server manages the state of incoming and outgoing wires
 pub struct WireListener<T: HandleWire<C>, C: ConnectConfig> {
     /// Connect config like it holds tlsconfig and such if needed to connect to remote
     connect_config: C,
@@ -36,7 +36,7 @@ where
             // #todo have fn to set options on streams.
             while let Some(event) = inbox.recv().await {
                 match event {
-                    WireListenerEvent::OutcominWire {
+                    WireListenerEvent::OutgoingWire {
                         stream,
                         forward_info,
                         reply,
@@ -178,8 +178,8 @@ pub enum WireListenerEvent<C: ConnectConfig> {
         /// Reply handle to skip handle wire
         reply: Option<oneshot::Sender<Result<Option<WireStream<C::Stream, C>>, std::io::Error>>>,
     },
-    /// Outcoming wires to remote peers
-    OutcominWire {
+    /// Outgoing wires to remote peers
+    OutgoingWire {
         stream: C::Stream,
         forward_info: Option<(WireId, u128)>,
         reply: oneshot::Sender<Result<WireStream<C::Stream, C>, std::io::Error>>,

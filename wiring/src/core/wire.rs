@@ -1,3 +1,5 @@
+use std::{pin::Pin, task::Poll};
+
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
 use tokio::{
@@ -94,6 +96,37 @@ impl Wire for TcpStream {
     }
 }
 
+#[derive(Debug)]
+struct ConsumeWire<T>(Option<T>);
+
+impl<T: SplitStream> Unwire for ConsumeWire<T> {
+    type Stream = T;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async move {
+            if let Some(wire) = Option::take(&mut self.0) {
+                return Ok(wire);
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Unable to consume a wire",
+            ))
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ConsumeWire<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Unable to poll_read from a consumed wire",
+        )))
+    }
+}
+
 impl<T: AsyncWrite + Send + Sync + Unpin + 'static, C: ConnectConfig> Wire for WireStream<T, C> {
     type Stream = WireStream<C::Stream, C>;
 
@@ -112,7 +145,7 @@ impl<T: AsyncWrite + Send + Sync + Unpin + 'static, C: ConnectConfig> Wire for W
                 // bi connect
                 let (reply, rx) = oneshot::channel();
                 local_handle
-                    .send(WireListenerEvent::OutcominWire {
+                    .send(WireListenerEvent::OutgoingWire {
                         stream,
                         forward_info: Some((peer.wire_info.wire_id(), peer.wire_info.access_key())),
                         reply,
@@ -238,6 +271,106 @@ impl<T, C: ConnectConfig> WireStream<T, C> {
         self.peer.replace(peer);
         self
     }
+    /// Convert the wire into a bi-channel or handle or receive
+    pub async fn into<R: Unwiring>(self) -> Result<R, std::io::Error>
+    where
+        C: ConnectConfig<Stream = T>,
+        Self: SplitStream,
+    {
+        // Convert the wire into a consumed wire, to enable stream fn taking ownership of the stream instead of unwiring
+        // incoming wire.
+        let mut consume = ConsumeWire(Some(self));
+        consume.unwire::<R>().await
+    }
+}
+
+pub struct WireChannel<Sender, Receiver> {
+    pub sender: Sender,
+    pub receiver: Receiver,
+}
+
+#[allow(dead_code)]
+impl<S, R> WireChannel<S, R> {
+    fn new(sender: S, receiver: R) -> Self {
+        Self { sender, receiver }
+    }
+    /// Convert this into tuple
+    pub fn into_inner(self) -> (S, R) {
+        (self.sender, self.receiver)
+    }
+}
+
+impl<S: Wiring + 'static, R: Unwiring + 'static> Unwiring
+    for WireChannel<tokio::sync::mpsc::Sender<S>, tokio::sync::mpsc::Receiver<R>>
+{
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async move {
+            let buffer = wire.bounded_buffer();
+            let wire = wire.stream().await?;
+            let (mut r, mut w) = wire.split()?;
+
+            // create the sender channel side.
+            let (sender, mut rx) = tokio::sync::mpsc::channel::<S>(buffer.into());
+
+            let sender_task = async move {
+                while let Some(item) = rx.recv().await {
+                    if let Err(_) = w.wire(item).await {
+                        rx.close();
+                        break;
+                    }
+                }
+                w.shutdown().await.ok();
+            };
+            let s_j = tokio::spawn(sender_task.boxed());
+            // create receiver channel
+            let (tx, receiver) = tokio::sync::mpsc::channel::<R>(buffer.into());
+            let recv_task = async move {
+                while let Ok(item) = r.unwire().await {
+                    if let Err(_) = tx.send(item).await {
+                        break;
+                    }
+                }
+                s_j.abort();
+            };
+            tokio::spawn(recv_task.boxed());
+            Ok(Self::new(sender, receiver))
+        }
+    }
+}
+
+impl<S: Wiring + 'static, R: Unwiring + 'static> Unwiring for WireChannel<UnboundedSender<S>, UnboundedReceiver<R>> {
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async move {
+            let wire = wire.stream().await?;
+            let (mut r, mut w) = wire.split()?;
+
+            // create the sender channel side.
+            let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel::<S>();
+
+            let sender_task = async move {
+                while let Some(item) = rx.recv().await {
+                    if let Err(_) = w.wire(item).await {
+                        rx.close();
+                        break;
+                    }
+                }
+                w.shutdown().await.ok();
+            };
+            let s_j = tokio::spawn(sender_task.boxed());
+            // create receiver channel
+            let (tx, receiver) = tokio::sync::mpsc::unbounded_channel::<R>();
+            let recv_task = async move {
+                while let Ok(item) = r.unwire().await {
+                    if let Err(_) = tx.send(item) {
+                        break;
+                    }
+                }
+                s_j.abort();
+            };
+            tokio::spawn(recv_task.boxed());
+            Ok(Self::new(sender, receiver))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,7 +462,7 @@ impl<C: ConnectConfig> WireConfig<C, tokio::sync::mpsc::UnboundedSender<WireList
         let stream = self.config.connect_stream(&connect_info).await?;
         let (reply, rx) = oneshot::channel();
 
-        let event = WireListenerEvent::OutcominWire {
+        let event = WireListenerEvent::OutgoingWire {
             stream,
             forward_info: None,
             reply,
@@ -906,6 +1039,16 @@ impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
         async {
             self.0.wiring(wire).await?;
             self.1.wiring(wire).await
+        }
+    }
+}
+
+impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        async {
+            self.0.wiring(wire).await?;
+            self.1.wiring(wire).await?;
+            self.2.wiring(wire).await
         }
     }
 }

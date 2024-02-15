@@ -11,3 +11,11 @@ tokio = {version = "1.0", features = ["full"]}
 [[example]]
 name = "hello-world"
 path = "hello_world.rs"
+
+[[example]]
+name = "channel"
+path = "channel.rs"
+
+[[example]]
+name = "nested"
+path = "nested.rs"
