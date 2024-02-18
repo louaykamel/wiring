@@ -5,7 +5,7 @@ use tokio::{
         oneshot,
     },
 };
-use wiring::prelude::{ConnectInfo, TcpStreamConfig, WireChannel, WireConfig};
+use wiring::prelude::{BufStreamConfig, ConnectInfo, TcpStreamConfig, WireChannel, WireConfig};
 
 #[tokio::main]
 async fn main() {
@@ -13,7 +13,8 @@ async fn main() {
     // This the listener loop which you will get your tcpstream or websocket, etc.
     let connect_info = ConnectInfo::TcpStream("127.0.0.1:9999".to_string());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let h = WireListener::new(tx, TcpStreamConfig, connect_info.clone()).run();
+    let config = BufStreamConfig::new(TcpStreamConfig);
+    let h = WireListener::new(tx, config, connect_info.clone()).run();
     let tcp_listener = TcpListener::bind("127.0.0.1:9999").await.expect("Tcplistener to bind");
     let listener = async move {
         while let Ok((stream, _)) = tcp_listener.accept().await {
@@ -49,7 +50,8 @@ async fn main() {
 }
 
 async fn client(connect_info: ConnectInfo) {
-    let client_wire = WireConfig::new(TcpStreamConfig)
+    let config = BufStreamConfig::new(TcpStreamConfig);
+    let client_wire = WireConfig::new(config)
         .connect(&connect_info)
         .await
         .expect("Wireconfig to connect");

@@ -1,4 +1,4 @@
-use std::{pin::Pin, task::Poll};
+use std::{fmt::Debug, pin::Pin, task::Poll};
 
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
@@ -15,7 +15,7 @@ use url::Url;
 use super::{
     listener::{ConnectInfo, Local, Peer, WireListenerEvent},
     unwire::{Unwire, Unwiring},
-    ConnectConfig, SplitStream,
+    ConnectConfig, IoSplit, SplitStream,
 };
 
 type WireId = u64;
@@ -67,6 +67,18 @@ pub trait Wire: AsyncWrite + Unpin + Send + 'static + Sync + Sized {
     }
     fn wiring<T: Wiring>(&mut self, item: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         item.wiring(self)
+    }
+}
+
+impl<T: AsyncWrite + Send + AsyncRead + 'static + Sync + Unpin + Debug> Wire for tokio::io::WriteHalf<T> {
+    type Stream = IoSplit<T>;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from WriteHalf",
+            ))
+        }
     }
 }
 
@@ -127,7 +139,10 @@ impl<T: AsyncRead + Unpin> AsyncRead for ConsumeWire<T> {
     }
 }
 
-impl<T: AsyncWrite + Send + Sync + Unpin + 'static, C: ConnectConfig> Wire for WireStream<T, C> {
+impl<T: AsyncWrite + Send + Sync + Unpin + 'static, C: ConnectConfig> Wire for WireStream<T, C>
+where
+    C::Stream: SplitStream,
+{
     type Stream = WireStream<C::Stream, C>;
 
     fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
@@ -139,8 +154,8 @@ impl<T: AsyncWrite + Send + Sync + Unpin + 'static, C: ConnectConfig> Wire for W
             ))?;
             let connect_info = &peer.wire_info.connect_info;
 
-            let stream: <C as ConnectConfig>::Stream = peer.connect_config.connect_stream(connect_info).await?;
-
+            let stream: <C as ConnectConfig>::RawStream = peer.connect_config.connect_stream(connect_info).await?;
+            let stream = peer.connect_config.enhance_stream(stream)?;
             if let Some(local_handle) = &peer.local_handle {
                 // bi connect
                 let (reply, rx) = oneshot::channel();
@@ -401,6 +416,7 @@ impl<C: ConnectConfig> WireConfig<C> {
     /// Connect to remote in client mode
     pub async fn connect(&self, connect_info: &ConnectInfo) -> Result<WireStream<C::Stream, C>, std::io::Error> {
         let stream = self.config.connect_stream(&connect_info).await?;
+        let stream = self.config.enhance_stream(stream)?;
 
         let mut wire = WireStream::new(stream);
         // wire none and none for both wire_info and forward info, as we're not forwarding this.
@@ -418,13 +434,14 @@ impl<C: ConnectConfig> WireConfig<C, tokio::sync::mpsc::UnboundedSender<WireList
     /// Push the stream and RETURN (if set and not nested forward), else it's handled at listener level with handle_wire
     pub async fn wire<const RETURN: bool>(
         &self,
-        mut stream: C::Stream,
+        stream: C::RawStream,
     ) -> Result<Option<WireStream<C::Stream, C>>, std::io::Error> {
-        let mut temp_wire = WireStream::<C::Stream, C>::new(stream);
+        let mut stream = self.config.enhance_stream(stream)?;
+        // let mut temp_wire = WireStream::<C::Stream, C>::new(stream);
 
-        let remote_info = temp_wire.unwire().await?;
-        let forward_info = temp_wire.unwire().await?;
-        stream = temp_wire.stream;
+        let remote_info = stream.unwire().await?;
+        let forward_info = stream.unwire().await?;
+        // stream = temp_wire.stream;
         if RETURN {
             let (reply, rx) = oneshot::channel();
             let message = WireListenerEvent::Incomingwire {
@@ -459,7 +476,8 @@ impl<C: ConnectConfig> WireConfig<C, tokio::sync::mpsc::UnboundedSender<WireList
     }
     /// Connect to remote with enabled bi-directional communication
     pub async fn connect(&self, connect_info: &ConnectInfo) -> Result<WireStream<C::Stream, C>, std::io::Error> {
-        let stream = self.config.connect_stream(&connect_info).await?;
+        let raw_stream = self.config.connect_stream(&connect_info).await?;
+        let stream = self.config.enhance_stream(raw_stream)?;
         let (reply, rx) = oneshot::channel();
 
         let event = WireListenerEvent::OutgoingWire {

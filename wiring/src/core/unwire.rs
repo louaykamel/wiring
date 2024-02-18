@@ -1,7 +1,8 @@
-use super::{wire::Wiring, ConnectConfig, SplitStream, WireId};
+use super::{wire::Wiring, ConnectConfig, IoSplit, SplitStream, WireId};
 use futures::{FutureExt, StreamExt};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fmt::Debug,
     num::NonZeroUsize,
     str::FromStr,
 };
@@ -41,6 +42,10 @@ impl Unwire for tokio::net::TcpStream {
     type Stream = Self;
 }
 
+impl<T: AsyncRead + tokio::io::AsyncWrite + Sync + Send + Unpin + Debug + 'static> Unwire for tokio::io::ReadHalf<T> {
+    type Stream = IoSplit<T>;
+}
+
 impl Unwire for OwnedReadHalf {
     type Stream = tokio::net::TcpStream;
 }
@@ -48,6 +53,7 @@ impl Unwire for OwnedReadHalf {
 impl<T: Send + Sync + AsyncRead + Unpin, C> Unwire for WireStream<T, C>
 where
     C: ConnectConfig,
+    WireStream<C::Stream, C>: SplitStream,
 {
     type Stream = WireStream<C::Stream, C>;
 
