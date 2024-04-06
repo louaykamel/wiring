@@ -5,6 +5,7 @@ pub mod prelude {
         listener::{ConnectInfo, WireListener},
         unwire::{Unwire, Unwiring},
         wire::{Wire, WireChannel, WireConfig, WireStream, Wiring},
-        BufStream, BufStreamConfig, ConnectConfig, TcpStreamConfig,
+        wired::{WiredHandle, WiredServer},
+        BufStream, BufStreamConfig, ConnectConfig, SplitStream, TcpStreamConfig,
     };
 }

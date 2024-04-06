@@ -17,6 +17,7 @@ use wire::{WireStream, Wiring};
 pub(crate) mod listener;
 pub(crate) mod unwire;
 pub(crate) mod wire;
+pub(crate) mod wired;
 
 use listener::Local;
 
@@ -126,8 +127,6 @@ where
 {
     type Unwire = WireStream<<T as SplitStream>::Unwire, C>;
     type Wire = WireStream<<T as SplitStream>::Wire, C>;
-    // type Unwire = <T as SplitStream>::Unwire;
-    // type Wire = <T as SplitStream>::Wire;
     fn split(self) -> Result<(Self::Unwire, Self::Wire), std::io::Error> {
         // to make this more generic, we're using io::split.
         // let (r, w) = tokio::io::split(self.stream);

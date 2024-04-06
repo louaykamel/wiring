@@ -1,4 +1,4 @@
-use std::{fmt::Debug, pin::Pin, task::Poll};
+use std::{any::TypeId, fmt::Debug, pin::Pin, task::Poll};
 
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
@@ -15,6 +15,7 @@ use url::Url;
 use super::{
     listener::{ConnectInfo, Local, Peer, WireListenerEvent},
     unwire::{Unwire, Unwiring},
+    wired::{HandleEvent, WiredHandle, WiredServer},
     ConnectConfig, IoSplit, SplitStream,
 };
 
@@ -297,6 +298,19 @@ impl<T, C: ConnectConfig> WireStream<T, C> {
         let mut consume = ConsumeWire(Some(self));
         consume.unwire::<R>().await
     }
+    /// Convert the wire stream to bi wired
+    pub fn wired<LocalEvent, RemoteEvent, H: HandleEvent<RemoteEvent>>(
+        self,
+        handle_event: H,
+    ) -> Result<WiredHandle<LocalEvent>, std::io::Error>
+    where
+        LocalEvent: Wiring + Debug + 'static,
+        RemoteEvent: Unwiring + Debug + 'static,
+        Self: SplitStream,
+    {
+        let h = WiredServer::new(self, handle_event)?.run();
+        Ok(h)
+    }
 }
 
 pub struct WireChannel<Sender, Receiver> {
@@ -340,9 +354,19 @@ impl<S: Wiring + 'static, R: Unwiring + 'static> Unwiring
             // create receiver channel
             let (tx, receiver) = tokio::sync::mpsc::channel::<R>(buffer.into());
             let recv_task = async move {
-                while let Ok(item) = r.unwire().await {
-                    if let Err(_) = tx.send(item).await {
-                        break;
+                loop {
+                    tokio::select! {
+                        _ = tx.closed() => {
+                            break;
+                        },
+                        item = r.unwire::<R>() => {
+                            if let Ok(item) = item {
+                                tx.send(item).await.ok();
+                            } else {
+                                break;
+                            }
+
+                        },
                     }
                 }
                 s_j.abort();
@@ -375,9 +399,19 @@ impl<S: Wiring + 'static, R: Unwiring + 'static> Unwiring for WireChannel<Unboun
             // create receiver channel
             let (tx, receiver) = tokio::sync::mpsc::unbounded_channel::<R>();
             let recv_task = async move {
-                while let Ok(item) = r.unwire().await {
-                    if let Err(_) = tx.send(item) {
-                        break;
+                loop {
+                    tokio::select! {
+                        _ = tx.closed() => {
+                            break;
+                        },
+                        item = r.unwire::<R>() => {
+                            if let Ok(item) = item {
+                                tx.send(item).ok();
+                            } else {
+                                break;
+                            }
+
+                        },
                     }
                 }
                 s_j.abort();
@@ -437,7 +471,6 @@ impl<C: ConnectConfig> WireConfig<C, tokio::sync::mpsc::UnboundedSender<WireList
         stream: C::RawStream,
     ) -> Result<Option<WireStream<C::Stream, C>>, std::io::Error> {
         let mut stream = self.config.enhance_stream(stream)?;
-        // let mut temp_wire = WireStream::<C::Stream, C>::new(stream);
 
         let remote_info = stream.unwire().await?;
         let forward_info = stream.unwire().await?;
@@ -503,6 +536,7 @@ pub trait Wiring: Send + Sync {
 }
 
 impl Wiring for WireInfo {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             self.wire_id.wiring(wire).await?;
@@ -513,6 +547,7 @@ impl Wiring for WireInfo {
 }
 
 impl<'a> Wiring for &'a WireInfo {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             self.wire_id.wiring(wire).await?;
@@ -523,18 +558,21 @@ impl<'a> Wiring for &'a WireInfo {
 }
 
 impl Wiring for String {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
     }
 }
 
 impl<'a> Wiring for &'a String {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
     }
 }
 
 impl<'a> Wiring for &'a str {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
     }
@@ -551,24 +589,28 @@ impl<'a> Wiring for &'a [u8] {
 }
 
 impl<'a, const LEN: usize> Wiring for &'a [u8; LEN] {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { wire.write_all(self).await }
     }
 }
 
 impl<const LEN: usize> Wiring for [u8; LEN] {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { wire.write_all(&self).await }
     }
 }
 
 impl Wiring for Url {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_str().wiring(wire).await }
     }
 }
 
 impl<'a> Wiring for &'a Url {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_str().wiring(wire).await }
     }
@@ -579,6 +621,7 @@ where
     T: Unwiring + 'static,
 {
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(mut self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let mut new: W::Stream = wire.stream().await?;
@@ -604,6 +647,8 @@ impl<T> Wiring for UnboundedSender<T>
 where
     T: Unwiring + 'static,
 {
+    const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let new: W::Stream = wire.stream().await?;
@@ -629,8 +674,9 @@ where
 }
 
 impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::broadcast::Receiver<T> {
-    /// note safe to store
+    /// not safe to store
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             let w = wire.stream().await?;
@@ -657,8 +703,9 @@ impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::broadcast::Receiver<T>
 }
 
 impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::watch::Receiver<T> {
-    /// note safe to store
+    /// not safe to store
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             let w = wire.stream().await?;
@@ -683,8 +730,9 @@ impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::watch::Receiver<T> {
 }
 
 impl<T: Wiring + Unwiring + 'static + Clone> Wiring for tokio::sync::watch::Sender<T> {
-    /// note safe to store
+    /// not safe to store
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             let mut w = wire.stream().await?;
@@ -726,10 +774,9 @@ where
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let mut new: W::Stream = wire.stream().await?;
-
             let task = async move {
                 while let Ok(item) = new.unwire().await {
-                    // note: detecting when this is dropped is impossible, as tokio doesn't provide closed()
+                    // note: detecting when this otherhalf is dropped is impossible, as tokio doesn't provide closed()
                     if let Err(_) = self.send(item) {
                         break;
                     };
@@ -746,6 +793,7 @@ where
     T: Unwiring + 'static,
 {
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let new: W::Stream = wire.stream().await?;
@@ -825,6 +873,7 @@ impl<T: Wiring + 'static> Wiring for UnboundedReceiver<T> {
 
 impl<T: Wiring + 'static> Wiring for tokio::sync::mpsc::Receiver<T> {
     const SAFE: bool = false;
+    #[inline]
     fn wiring<W: Wire>(mut self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let new: W::Stream = wire.stream().await?;
@@ -850,6 +899,7 @@ impl<T: Wiring + 'static> Wiring for tokio::sync::mpsc::Receiver<T> {
 }
 
 impl Wiring for () {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         // Must be wired as rust treats this as type even if it's zerosized. the reason:
         // channel can support sending (), and therefore the other end must detects when () is sent,
@@ -858,133 +908,176 @@ impl Wiring for () {
     }
 }
 
+impl Wiring for bool {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_u8(self as u8)
+    }
+}
+
+impl<'a> Wiring for &'a bool {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_u8(*self as u8)
+    }
+}
+
 impl Wiring for u8 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u8(self)
     }
 }
 
 impl<'a> Wiring for &'a u8 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u8(*self)
     }
 }
 
 impl Wiring for i8 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i8(self)
     }
 }
 
 impl<'a> Wiring for &'a i8 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i8(*self)
     }
 }
 
 impl Wiring for u16 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u16(self)
     }
 }
 
 impl<'a> Wiring for &'a u16 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u16(*self)
     }
 }
 
 impl Wiring for i16 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i16(self)
     }
 }
 
 impl<'a> Wiring for &'a i16 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i16(*self)
     }
 }
 
 impl Wiring for u32 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u32(self)
     }
 }
 
 impl<'a> Wiring for &'a u32 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u32(*self)
     }
 }
 
 impl Wiring for i32 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i32(self)
     }
 }
 
 impl<'a> Wiring for &'a i32 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i32(*self)
     }
 }
 
 impl Wiring for u64 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u64(self)
     }
 }
 
 impl<'a> Wiring for &'a u64 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u64(*self)
     }
 }
 
 impl Wiring for i64 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i64(self)
     }
 }
 
 impl<'a> Wiring for &'a i64 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i64(*self)
     }
 }
 
 impl Wiring for u128 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u128(self)
     }
 }
 
 impl<'a> Wiring for &'a u128 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u128(*self)
     }
 }
 
 impl Wiring for i128 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i128(self)
     }
 }
 
 impl<'a> Wiring for &'a i128 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i128(*self)
     }
 }
 
-impl<T: Wiring> Wiring for Vec<T> {
-    fn wiring<W: Wire>(mut self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+impl<T: Wiring + 'static> Wiring for Vec<T> {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let len = self.len() as u64;
             len.wiring(wire).await?;
-            while let Some(t) = self.pop() {
-                t.wiring(wire).await?;
+            let t = TypeId::of::<T>();
+            let is_u8 = TypeId::of::<u8>();
+            let is_i8 = TypeId::of::<i8>();
+            if t == is_u8 || t == is_i8 {
+                let vec = unsafe { std::mem::transmute::<_, Vec<u8>>(self) };
+                wire.write_all(vec.as_slice()).await?;
+            } else {
+                for t in self {
+                    t.wiring(wire).await?;
+                }
             }
             Ok(())
         }
@@ -993,15 +1086,24 @@ impl<T: Wiring> Wiring for Vec<T> {
 
 impl<'a, T: Wiring> Wiring for &'a Vec<T>
 where
-    &'a T: Wiring,
+    &'a T: Wiring + 'static,
 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let len = self.len() as u64;
             len.wiring(wire).await?;
-            let mut i = self.iter();
-            while let Some(t) = i.next() {
-                t.wiring(wire).await?;
+            let t = TypeId::of::<T>();
+            let is_u8 = TypeId::of::<u8>();
+            let is_i8 = TypeId::of::<i8>();
+            if t == is_u8 || t == is_i8 {
+                let vec = unsafe { std::mem::transmute::<_, &'a Vec<u8>>(self) };
+                wire.write_all(vec.as_slice()).await?;
+            } else {
+                let mut i = self.iter();
+                while let Some(t) = i.next() {
+                    t.wiring(wire).await?;
+                }
             }
             Ok(())
         }
@@ -1009,6 +1111,7 @@ where
 }
 
 impl<T: Wiring> Wiring for std::collections::HashSet<T> {
+    #[inline]
     fn wiring<W: Wire>(mut self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async move {
             let len = self.len() as u64;
@@ -1026,6 +1129,7 @@ impl<'a, T: Wiring> Wiring for &'a std::collections::HashSet<T>
 where
     &'a T: Wiring + std::fmt::Debug,
 {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         let mut i = self.iter();
         async move {
@@ -1040,6 +1144,7 @@ where
 }
 
 impl<T: Wiring> Wiring for Option<T> {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
             if let Some(t) = self {
@@ -1053,6 +1158,7 @@ impl<T: Wiring> Wiring for Option<T> {
 }
 
 impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
             self.0.wiring(wire).await?;
@@ -1062,6 +1168,7 @@ impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
 }
 
 impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
+    #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
             self.0.wiring(wire).await?;

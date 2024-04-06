@@ -1,6 +1,7 @@
 use super::{wire::Wiring, ConnectConfig, IoSplit, SplitStream, WireId};
 use futures::{FutureExt, StreamExt};
 use std::{
+    any::TypeId,
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     num::NonZeroUsize,
@@ -84,6 +85,7 @@ pub trait Unwiring: Sized + Send + Sync {
 }
 
 impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::oneshot::Sender<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             let mut w = wire.stream().await?;
@@ -107,6 +109,7 @@ impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::oneshot::Sender<T
 }
 
 impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::oneshot::Receiver<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             let mut new = wire.stream().await?;
@@ -130,6 +133,7 @@ impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::oneshot::Receiver
 }
 
 impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::mpsc::UnboundedSender<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             let w = wire.stream().await?;
@@ -155,6 +159,7 @@ impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::mpsc::UnboundedSe
 }
 
 impl<T: Unwiring + Wiring + 'static> Unwiring for tokio::sync::mpsc::UnboundedReceiver<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             let w = wire.stream().await?;
@@ -299,6 +304,7 @@ impl<T: Wiring + Unwiring + 'static + Clone> Unwiring for tokio::sync::watch::Se
 }
 
 impl Unwiring for () {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             match u8::unwiring(wire).await? {
@@ -312,67 +318,88 @@ impl Unwiring for () {
     }
 }
 
+impl Unwiring for bool {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async move { Ok(wire.read_u8().await? != 0) }
+    }
+}
+
 impl Unwiring for u8 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_u8()
     }
 }
 
 impl Unwiring for i8 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i8()
     }
 }
 
 impl Unwiring for u16 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_u16()
     }
 }
 
 impl Unwiring for i16 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i16()
     }
 }
 
 impl Unwiring for u32 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_u32()
     }
 }
 
 impl Unwiring for i32 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i32()
     }
 }
 
 impl Unwiring for u64 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_u64()
     }
 }
 
 impl Unwiring for i64 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i64()
     }
 }
 
 impl Unwiring for u128 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
-        wire.read_u128()
+        async move {
+            let w = wire.read_u128().await?;
+            Ok(w)
+        }
     }
 }
 
 impl Unwiring for i128 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i128()
     }
 }
 
 impl Unwiring for String {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let mut dst = String::new();
@@ -385,6 +412,7 @@ impl Unwiring for String {
 }
 
 impl Unwiring for Url {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let url = String::unwiring(wire).await?;
@@ -396,23 +424,34 @@ impl Unwiring for Url {
     }
 }
 
-impl<T: Unwiring> Unwiring for Vec<T> {
+impl<T: Unwiring + 'static> Unwiring for Vec<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
-            let mut len = u64::unwiring(wire).await?;
+            let mut len: u64 = u64::unwiring(wire).await?;
             let capacity = usize::try_from(len).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-            let mut vec: Vec<T> = Vec::with_capacity(capacity);
-            while len > 0 {
-                len -= 1;
-                let t = T::unwiring(wire).await?;
-                vec.push(t);
+            let t = TypeId::of::<T>();
+            let is_u8 = TypeId::of::<u8>();
+            if t == is_u8 {
+                let mut vec: Vec<u8> = vec![0u8; capacity];
+                wire.read_exact(&mut vec).await?;
+                let vec = unsafe { std::mem::transmute::<_, Vec<T>>(vec) };
+                Ok(vec)
+            } else {
+                let mut vec: Vec<T> = Vec::with_capacity(capacity);
+                while len > 0 {
+                    len -= 1;
+                    let t = T::unwiring(wire).await?;
+                    vec.push(t);
+                }
+                Ok(vec)
             }
-            Ok(vec)
         }
     }
 }
 
 impl<T: Unwiring + Eq + PartialEq + std::hash::Hash> Unwiring for HashSet<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let mut len = u64::unwiring(wire).await?;
@@ -433,6 +472,7 @@ where
     K: Unwiring + Eq + PartialEq + std::hash::Hash,
     V: Unwiring,
 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let mut len = u64::unwiring(wire).await?;
@@ -454,6 +494,7 @@ where
     K: Unwiring + Ord + std::hash::Hash,
     V: Unwiring,
 {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let mut len = u64::unwiring(wire).await?;
@@ -472,6 +513,7 @@ where
 }
 
 impl<T: Unwiring + Ord + std::hash::Hash> Unwiring for std::collections::BTreeSet<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async {
             let mut len = u64::unwiring(wire).await?;
@@ -489,6 +531,7 @@ impl<T: Unwiring + Ord + std::hash::Hash> Unwiring for std::collections::BTreeSe
 }
 
 impl<T: Unwiring> Unwiring for Option<T> {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             match u8::unwiring(wire).await? {
@@ -504,7 +547,21 @@ impl<T: Unwiring> Unwiring for Option<T> {
 }
 
 impl<T: Unwiring, TT: Unwiring> Unwiring for (T, TT) {
+    #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async { Ok((T::unwiring(wire).await?, TT::unwiring(wire).await?)) }
+    }
+}
+
+impl<T: Unwiring, TT: Unwiring, T3: Unwiring> Unwiring for (T, TT, T3) {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            Ok((
+                T::unwiring(wire).await?,
+                TT::unwiring(wire).await?,
+                T3::unwiring(wire).await?,
+            ))
+        }
     }
 }

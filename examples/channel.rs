@@ -45,6 +45,7 @@ async fn client(connect_info: ConnectInfo) {
         .recv()
         .await
         .expect("Client expected to receive response from remote");
+
     assert!(response == 7i32);
     println!("Client received: <- {}", response);
 }

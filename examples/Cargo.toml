@@ -19,3 +19,7 @@ path = "channel.rs"
 [[example]]
 name = "nested"
 path = "nested.rs"
+
+[[example]]
+name = "wired"
+path = "wired.rs"
