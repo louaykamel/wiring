@@ -2,6 +2,12 @@
 name = "wiring-derive"
 version = "0.1.0"
 edition = "2021"
+authors = ["Louay Kamel"]
+license-file = "LICENSE"
+repository = "https://github.com/louaykamel/wiring"
+description = "A macro helper crate for wiring"
+keywords = ["wiring", "macro", "derive"]
+exclude = [".github/**/*"]
 
 [lib]
 proc-macro = true
