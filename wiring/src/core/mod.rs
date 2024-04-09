@@ -23,13 +23,24 @@ use listener::Local;
 
 use self::listener::ConnectInfo;
 
-pub trait SplitStream: Sized + Send + Sync + Unwire + Wire + Debug {
+pub trait SplitStream: Sized + Send + Sync + Unwire + Wire + Debug + 'static {
     type Unwire: Unwire;
     type Wire: Wire;
     fn split(self) -> Result<(Self::Unwire, Self::Wire), std::io::Error> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "Wire doesn't support split",
+        ))
+    }
+}
+
+impl SplitStream for std::io::Cursor<Vec<u8>> {
+    type Unwire = Self;
+    type Wire = Self;
+    fn split(self) -> Result<(Self::Unwire, Self::Wire), std::io::Error> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Wire Cursoer<Vec<u8>> doesn't support split",
         ))
     }
 }

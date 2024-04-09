@@ -267,7 +267,7 @@ impl<T> InternalWriteHalf<T> {
 impl<T: Send + Sync + 'static> AsyncWrite for InternalWriteHalf<T> {
     #[inline]
     fn is_write_vectored(&self) -> bool {
-        true
+        self.buf.is_write_vectored()
     }
     #[inline]
     fn poll_flush(
@@ -412,7 +412,12 @@ impl<T: Send + Sync + 'static> AsyncWrite for InternalStream<T> {
 impl<T: Send + Sync + Debug + 'static> Wire for InternalStream<T> {
     type Stream = InternalStream<T>;
     fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
-        async move { todo!() }
+        async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unable to create internalstream from internalstream",
+            ))
+        }
     }
 }
 

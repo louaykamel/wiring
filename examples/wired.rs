@@ -5,7 +5,7 @@ use tokio::{
     net::TcpListener,
     sync::{mpsc::unbounded_channel, oneshot},
 };
-use wiring::prelude::{ConnectInfo, TcpStreamConfig, WireConfig};
+use wiring::prelude::{ConnectInfo, TcpStreamConfig, Unwiring, WireConfig, Wiring};
 
 #[tokio::main]
 async fn main() {
@@ -52,7 +52,7 @@ async fn client(connect_info: ConnectInfo) {
         .await
         .expect("Wireconfig to connect");
 
-    // for bi communicate the client can also create a channel to handle events from server, but in our example
+    // for bi communication the client can also create a channel to handle events from server, but in our example
     // client only sends requests therefore client
     // the use noop as handle event
     let wired = client_wire.wired(()).expect("To convert clientwire to wired");
@@ -72,7 +72,7 @@ async fn client(connect_info: ConnectInfo) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Wiring, Unwiring)]
 pub enum ClientRequest {
     EchoMessage {
         reply: oneshot::Sender<String>,
@@ -82,52 +82,4 @@ pub enum ClientRequest {
         reply: oneshot::Sender<i32>,
         request: i32,
     },
-}
-
-// This is temporary, till we impl a macro to derive.
-impl wiring::prelude::Wiring for ClientRequest {
-    fn wiring<W: wiring::prelude::Wire>(
-        self,
-        wire: &mut W,
-    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            match self {
-                Self::EchoMessage { reply, request } => {
-                    0u8.wiring(wire).await?;
-                    reply.wiring(wire).await?;
-                    request.wiring(wire).await?;
-                }
-                Self::EchoNumber { reply, request } => {
-                    1u8.wiring(wire).await?;
-                    reply.wiring(wire).await?;
-                    request.wiring(wire).await?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-// This is temporary, till we impl a macro to derive.
-impl wiring::prelude::Unwiring for ClientRequest {
-    fn unwiring<W: wiring::prelude::Unwire>(
-        wire: &mut W,
-    ) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
-        async move {
-            match u8::unwiring(wire).await? {
-                0 => Ok(Self::EchoMessage {
-                    reply: wire.unwiring().await?,
-                    request: wire.unwiring().await?,
-                }),
-                1 => Ok(Self::EchoNumber {
-                    reply: wire.unwiring().await?,
-                    request: wire.unwiring().await?,
-                }),
-                _ => Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unexpected clientrequest u8 variant",
-                )),
-            }
-        }
-    }
 }

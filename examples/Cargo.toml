@@ -6,6 +6,8 @@ edition = "2021"
 
 [dev-dependencies]
 wiring = {path = "../wiring"}
+wiring-derive = {path = "../wiring-derive"}
+
 tokio = {version = "1.0", features = ["full"]}
 
 [[example]]

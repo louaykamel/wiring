@@ -71,6 +71,56 @@ pub trait Wire: AsyncWrite + Unpin + Send + 'static + Sync + Sized {
     }
 }
 
+impl Wire for Vec<u8> {
+    type Stream = TcpStream;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from Vec<u8>",
+            ))
+        }
+    }
+}
+
+impl Wire for std::io::Cursor<Vec<u8>> {
+    type Stream = Self;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from std::io::Cursor<Vec<u8>>",
+            ))
+        }
+    }
+}
+
+impl<RW: AsyncRead + AsyncWrite + Unpin + Send + Sync + Debug + 'static> Wire for tokio::io::BufStream<RW> {
+    type Stream = Self;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from std::io::Cursor<Vec<u8>>",
+            ))
+        }
+    }
+}
+impl<RW: AsyncRead + AsyncWrite + Unpin + Send + Sync + Debug + 'static> SplitStream for tokio::io::BufStream<RW> {
+    type Unwire = Self;
+    type Wire = Self;
+    fn split(self) -> Result<(Self::Unwire, Self::Wire), std::io::Error> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Cannot to establish stream from WriteHalf",
+        ))
+    }
+}
+
+impl<RW: AsyncRead + AsyncWrite + Unpin + Send + Sync + Debug + 'static> Unwire for tokio::io::BufStream<RW> {
+    type Stream = Self;
+}
+
 impl<T: AsyncWrite + Send + AsyncRead + 'static + Sync + Unpin + Debug> Wire for tokio::io::WriteHalf<T> {
     type Stream = IoSplit<T>;
     fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
@@ -578,6 +628,13 @@ impl<'a> Wiring for &'a str {
     }
 }
 
+impl Wiring for char {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move { (self as u32).wiring(wire).await }
+    }
+}
+
 impl<'a> Wiring for &'a [u8] {
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
@@ -904,7 +961,7 @@ impl Wiring for () {
         // Must be wired as rust treats this as type even if it's zerosized. the reason:
         // channel can support sending (), and therefore the other end must detects when () is sent,
         // if it was no-op, then no way for unwire to detect it. think of it as heartbeat.
-        wire.wiring(1u8)
+        wire.wiring(0u8)
     }
 }
 

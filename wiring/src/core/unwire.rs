@@ -47,6 +47,10 @@ impl<T: AsyncRead + tokio::io::AsyncWrite + Sync + Send + Unpin + Debug + 'stati
     type Stream = IoSplit<T>;
 }
 
+impl Unwire for std::io::Cursor<Vec<u8>> {
+    type Stream = Self;
+}
+
 impl Unwire for OwnedReadHalf {
     type Stream = tokio::net::TcpStream;
 }
@@ -308,7 +312,7 @@ impl Unwiring for () {
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         async move {
             match u8::unwiring(wire).await? {
-                1 => Ok(()),
+                0 => Ok(()),
                 _ => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "Unexpected u8 data for ()",

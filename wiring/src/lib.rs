@@ -1,4 +1,5 @@
 mod core;
+mod test;
 
 pub mod prelude {
     pub use crate::core::{
@@ -8,4 +9,5 @@ pub mod prelude {
         wired::{WiredHandle, WiredServer},
         BufStream, BufStreamConfig, ConnectConfig, SplitStream, TcpStreamConfig,
     };
+    pub use wiring_derive::{Unwiring, Wiring};
 }
