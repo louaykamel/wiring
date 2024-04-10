@@ -90,7 +90,12 @@ async fn test_enum_unit() {
     let unit = Enum::<String, String>::Unit;
     wire.wire(&unit).await.expect("To wire Unit enum");
 
+    wire.wire(&unit).await.expect("To wire Unit enum");
+
     let mut unwire = std::io::Cursor::new(wire);
+
+    let result: Enum<String, String> = unwire.unwire().await.expect("To unwire Unit enum");
+    assert!(Enum::Unit == result);
 
     let result: Enum<String, String> = unwire.unwire().await.expect("To unwire Unit enum");
     assert!(Enum::Unit == result);

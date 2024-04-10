@@ -1,13 +1,12 @@
-use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::quote;
-use syn::{
-    parse_macro_input, parse_quote, Attribute, Data, DeriveInput, Fields, GenericParam, Index, Lifetime, Variant,
-    WhereClause, WherePredicate,
-};
-
 #[proc_macro_derive(Wiring, attributes(tag))]
-pub fn wiring_proc_macro(input: TokenStream) -> TokenStream {
+pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    use proc_macro2::Span;
+    use quote::quote;
+    use syn::{
+        parse_macro_input, parse_quote, Data, DeriveInput, Fields, GenericParam, Index, Lifetime, Variant, WhereClause,
+        WherePredicate,
+    };
+
     let input = parse_macro_input!(input as DeriveInput);
     let this = input.ident;
     let data = input.data;
@@ -421,7 +420,7 @@ pub fn wiring_proc_macro(input: TokenStream) -> TokenStream {
     }
 }
 
-fn get_tag(attrs: &Vec<Attribute>, len: usize) -> proc_macro2::TokenStream {
+fn get_tag(attrs: &Vec<syn::Attribute>, len: usize) -> proc_macro2::TokenStream {
     let mut tag = quote::quote! {
         u16
     };
@@ -467,7 +466,8 @@ fn get_tag(attrs: &Vec<Attribute>, len: usize) -> proc_macro2::TokenStream {
 }
 
 #[proc_macro_derive(Unwiring, attributes(tag))]
-pub fn unwiring_proc_macro(input: TokenStream) -> TokenStream {
+pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    use syn::{parse_macro_input, Data, DeriveInput, Variant};
     let input = parse_macro_input!(input as DeriveInput);
     let ident = input.ident;
     let data = input.data;
@@ -528,6 +528,7 @@ pub fn unwiring_proc_macro(input: TokenStream) -> TokenStream {
                         #[inline]
                         fn unwiring<W: wiring::prelude::Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
                             async move {
+                                wire.unwiring::<()>().await?;
                                 Ok(Self)
                             }
                         }

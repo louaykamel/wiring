@@ -4,6 +4,7 @@ use std::{
     any::TypeId,
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
+    mem::MaybeUninit,
     num::NonZeroUsize,
     str::FromStr,
 };
@@ -371,6 +372,13 @@ impl Unwiring for i32 {
     }
 }
 
+impl Unwiring for f32 {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        wire.read_f32()
+    }
+}
+
 impl Unwiring for u64 {
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -382,6 +390,13 @@ impl Unwiring for i64 {
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         wire.read_i64()
+    }
+}
+
+impl Unwiring for f64 {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        wire.read_f64()
     }
 }
 
@@ -424,6 +439,65 @@ impl Unwiring for Url {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "Unable to unwire Url from String")
             })?;
             Ok(url)
+        }
+    }
+}
+
+impl<T: Unwiring + 'static, const LEN: usize> Unwiring for [T; LEN] {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            let t = TypeId::of::<T>();
+            let is_u8 = TypeId::of::<u8>();
+            if t == is_u8 {
+                let mut data = [0u8; LEN];
+                wire.read_exact(&mut data).await?;
+                let data = unsafe { std::mem::transmute_copy::<_, [T; LEN]>(&data) };
+                Ok(data)
+            } else {
+                let data = {
+                    let mut data: [MaybeUninit<T>; LEN] = unsafe { MaybeUninit::uninit().assume_init() };
+                    for elem in &mut data[..] {
+                        let t = T::unwiring(wire).await?;
+                        elem.write(t);
+                    }
+                    unsafe { core::mem::transmute_copy::<_, [T; LEN]>(&data) }
+                };
+                Ok(data)
+            }
+        }
+    }
+}
+
+impl<T: Unwiring + 'static> Unwiring for std::sync::Arc<T> {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            let v = wire.unwiring::<T>().await?;
+            let arced: Self = v.into();
+            Ok(arced)
+        }
+    }
+}
+
+impl<T: Unwiring + 'static> Unwiring for Box<T> {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            let vec = wire.unwiring::<T>().await?;
+            let boxx: Self = vec.into();
+            Ok(boxx)
+        }
+    }
+}
+
+impl<T: Unwiring + 'static> Unwiring for Box<[T]> {
+    #[inline]
+    fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
+        async {
+            let vec = wire.unwiring::<Vec<T>>().await?;
+            let boxx: Self = vec.into();
+            Ok(boxx)
         }
     }
 }

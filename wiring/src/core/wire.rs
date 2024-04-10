@@ -1,4 +1,4 @@
-use std::{any::TypeId, fmt::Debug, pin::Pin, task::Poll};
+use std::{any::TypeId, fmt::Debug, ops::Deref, pin::Pin, task::Poll};
 
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
@@ -635,27 +635,75 @@ impl Wiring for char {
     }
 }
 
-impl<'a> Wiring for &'a [u8] {
+impl<'a, T: Send + Sync + 'static> Wiring for &'a [T]
+where
+    &'a T: Wiring,
+{
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
             let len = self.len() as u64;
             len.wiring(wire).await?;
-            wire.write_all(self).await
+            let t = TypeId::of::<T>();
+            let is_u8 = TypeId::of::<u8>();
+            if t == is_u8 {
+                let slice = unsafe { std::mem::transmute::<_, &'a [u8]>(self) };
+                wire.write_all(slice).await?;
+            } else {
+                for t in self {
+                    t.wiring(wire).await?;
+                }
+            }
+            Ok(())
         }
     }
 }
 
-impl<'a, const LEN: usize> Wiring for &'a [u8; LEN] {
+impl<'a, T: Wiring + 'static, const LEN: usize> Wiring for &'a [T; LEN]
+where
+    &'a T: Wiring,
+{
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move { wire.write_all(self).await }
+        async move {
+            {
+                let t = TypeId::of::<T>();
+                let is_u8 = TypeId::of::<u8>();
+                let is_i8 = TypeId::of::<i8>();
+                let is_bool = TypeId::of::<bool>();
+                if t == is_u8 || t == is_i8 || t == is_bool {
+                    let vec = unsafe { std::mem::transmute_copy::<_, [u8; LEN]>(&self) };
+                    wire.write_all(vec.as_slice()).await?;
+                } else {
+                    for t in self {
+                        t.wiring(wire).await?;
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 
-impl<const LEN: usize> Wiring for [u8; LEN] {
+impl<T: Wiring + 'static, const LEN: usize> Wiring for [T; LEN] {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move { wire.write_all(&self).await }
+        async move {
+            {
+                let t = TypeId::of::<T>();
+                let is_u8 = TypeId::of::<u8>();
+                let is_i8 = TypeId::of::<i8>();
+                let is_bool = TypeId::of::<bool>();
+                if t == is_u8 || t == is_i8 || t == is_bool {
+                    let vec = unsafe { std::mem::transmute_copy::<_, [u8; LEN]>(&self) };
+                    wire.write_all(vec.as_slice()).await?;
+                } else {
+                    for t in self {
+                        t.wiring(wire).await?;
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -965,6 +1013,13 @@ impl Wiring for () {
     }
 }
 
+impl<'a> Wiring for &'a () {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        wire.wiring(0u8)
+    }
+}
+
 impl Wiring for bool {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
@@ -1063,6 +1118,20 @@ impl<'a> Wiring for &'a i32 {
     }
 }
 
+impl Wiring for f32 {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_f32(self)
+    }
+}
+
+impl<'a> Wiring for &'a f32 {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_f32(*self)
+    }
+}
+
 impl Wiring for u64 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
@@ -1088,6 +1157,20 @@ impl<'a> Wiring for &'a i64 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i64(*self)
+    }
+}
+
+impl Wiring for f64 {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_f64(self)
+    }
+}
+
+impl<'a> Wiring for &'a f64 {
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        wire.write_f64(*self)
     }
 }
 
@@ -1119,6 +1202,65 @@ impl<'a> Wiring for &'a i128 {
     }
 }
 
+impl<'a, T: Send + Sync + 'static> Wiring for &'a Box<[T]>
+where
+    &'a T: Wiring,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let vec = &**self;
+            vec.wiring(wire).await
+        }
+    }
+}
+
+impl<T> Wiring for Box<[T]>
+where
+    T: Wiring + 'static,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let vec = self.into_vec();
+            vec.wiring(wire).await
+        }
+    }
+}
+
+impl<T> Wiring for Box<T>
+where
+    T: Wiring + 'static,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let inner: T = *self;
+            inner.wiring(wire).await
+        }
+    }
+}
+
+impl<T> Wiring for std::sync::Arc<T>
+where
+    T: Wiring + Clone,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move { (*self).clone().wiring(wire).await }
+    }
+}
+
+impl<'a, T: Wiring> Wiring for &'a std::sync::Arc<T>
+where
+    &'a T: Wiring,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        async move { self.deref().wiring(wire).await }
+    }
+}
+
 impl<T: Wiring + 'static> Wiring for Vec<T> {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
@@ -1141,9 +1283,9 @@ impl<T: Wiring + 'static> Wiring for Vec<T> {
     }
 }
 
-impl<'a, T: Wiring> Wiring for &'a Vec<T>
+impl<'a, T: Wiring + 'static> Wiring for &'a Vec<T>
 where
-    &'a T: Wiring + 'static,
+    &'a T: Wiring,
 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
@@ -1158,6 +1300,7 @@ where
                 wire.write_all(vec.as_slice()).await?;
             } else {
                 let mut i = self.iter();
+
                 while let Some(t) = i.next() {
                     t.wiring(wire).await?;
                 }
@@ -1214,12 +1357,46 @@ impl<T: Wiring> Wiring for Option<T> {
     }
 }
 
+impl<'a, T: Wiring> Wiring for &'a Option<T>
+where
+    &'a T: Wiring,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        async move {
+            if self.is_none() {
+                0u8.wiring(wire).await?;
+            } else {
+                1u8.wiring(wire).await?;
+            };
+            if let Some(t) = self {
+                t.wiring(wire).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
 impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
             self.0.wiring(wire).await?;
             self.1.wiring(wire).await
+        }
+    }
+}
+
+impl<'a, T: Wiring, TT: Wiring> Wiring for &'a (T, TT)
+where
+    &'a T: Wiring,
+    &'a TT: Wiring,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        async {
+            (&self.0).wiring(wire).await?;
+            (&self.1).wiring(wire).await
         }
     }
 }
@@ -1231,6 +1408,22 @@ impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
             self.0.wiring(wire).await?;
             self.1.wiring(wire).await?;
             self.2.wiring(wire).await
+        }
+    }
+}
+
+impl<'a, T: Wiring, TT: Wiring, TTT: Wiring> Wiring for &'a (T, TT, TTT)
+where
+    &'a T: Wiring,
+    &'a TT: Wiring,
+    &'a TTT: Wiring,
+{
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+        async {
+            (&self.0).wiring(wire).await?;
+            (&self.1).wiring(wire).await?;
+            (&self.2).wiring(wire).await
         }
     }
 }

@@ -1,6 +1,6 @@
-use tokio::{self, sync::oneshot};
+use tokio::sync::oneshot;
 
-use self::wire::{HandleWire, WireConfig, WireInfo, WireStream};
+use self::wire::{HandleWire, WireConfig, WireInfo};
 
 use super::*;
 /// Listener server manages the state of incoming and outgoing wires
