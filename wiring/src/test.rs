@@ -4,18 +4,16 @@ use wiring::prelude::*;
 
 #[derive(Unwiring, Wiring, PartialEq, Eq)]
 struct Named<T> {
-    #[concat_start]
+    #[fixed(2)]
     point: Point,
-    #[concat_end]
     field2: Point,
     generic: T,
 }
 
 #[derive(Unwiring, Wiring, PartialEq, Eq)]
 struct Point {
-    #[concat_start]
+    #[fixed]
     x: u32,
-    #[concat_end]
     y: u32,
 }
 
@@ -32,4 +30,11 @@ fn unamed_test() {
 
     let d = unwire.unwire::<Unamed<String>>().unwrap();
     assert!(data == d);
+}
+
+#[derive(Wiring, Unwiring)]
+pub struct Abilities {
+    #[fixed]
+    pub walk_speed: f32,
+    pub fly_speed: f32,
 }

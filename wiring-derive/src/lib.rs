@@ -1,4 +1,4 @@
-use syn::{parse_quote, GenericParam, Generics, TypeParamBound};
+use syn::{parse_quote, GenericParam, Generics, Meta, TypeParamBound};
 
 fn has_type_params(generics: &Generics) -> bool {
     generics
@@ -7,7 +7,7 @@ fn has_type_params(generics: &Generics) -> bool {
         .any(|param| matches!(param, GenericParam::Type(_)))
 }
 
-#[proc_macro_derive(Wiring, attributes(tag, concat_start, concat_mid, concat_end))]
+#[proc_macro_derive(Wiring, attributes(tag, fixed))]
 pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     use quote::quote;
     use syn::{parse_macro_input, Data, DeriveInput, Fields, Index, Variant};
@@ -49,9 +49,15 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                 let mut ref_concat_fields_calls = Vec::new();
                 let mut sync_concat_fields_calls = Vec::new();
                 let mut concat_fixed_size_tokens = proc_macro2::TokenStream::new();
+                let fields_len = fields.named.len();
+
+                let mut field_count = 0;
+                let mut concat_start: Option<usize> = None;
 
                 for field in fields.named.iter() {
+                    field_count += 1;
                     let field_name = &field.ident;
+
                     let mut is_concat_start = false;
                     let mut is_concat_mid = false;
                     let mut is_concat_end = false;
@@ -66,38 +72,35 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
                     field.attrs.iter().for_each(|attr| {
                         // Here you check for the specific attribute that indicates the existence of a helper macro
-                        if attr.path().is_ident("concat_start") {
-                            if is_concat_mid || is_concat_end {
-                                panic!("Cannot set concat_start for field with concat_mid or concat_end");
-                            } else {
-                                is_concat_start = true;
+                        if attr.path().is_ident("fixed") {
+                            if let Meta::List(l) = attr.meta.clone() {
+                                if concat_start.is_some() {
+                                    panic!("Confilict in the fixed range")
+                                }
+                                if fields_len == 1 {
+                                    panic!("cannot apply fixed on struct with less than 2 fields");
+                                }
+                                let t = l.tokens.to_string().parse::<usize>().unwrap();
+                                if t == 1 {
+                                    panic!("cannot apply fixed with less than 2 fields");
+                                }
 
-                                let tokens = quote! {
-                                    <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
-                            }
-                        }
-                        if attr.path().is_ident("concat_mid") {
-                            if is_concat_end || is_concat_start {
-                                panic!("Cannot set concat_mid for field with concat_start or concat_end");
+                                if t > fields_len - (field_count - 1) {
+                                    panic!("cannot fixed beyond the struct length");
+                                }
+                                concat_start.replace(t);
+                                // now this is new start, so we set start flag, but we must reset it to false.
+                                is_concat_start = true;
                             } else {
-                                is_concat_mid = true;
-                                let tokens = quote! {
-                                   + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
-                            }
-                        }
-                        if attr.path().is_ident("concat_end") {
-                            if is_concat_mid || is_concat_start {
-                                panic!("Cannot set concat_end for field with concat_mid or concat_start");
-                            } else {
-                                is_concat_end = true;
-                                let tokens = quote! {
-                                    + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
+                                if concat_start.is_some() {
+                                    panic!("Confilict in the fixed range")
+                                }
+                                let t = fields_len - (field_count - 1);
+                                if t == 1 {
+                                    panic!("cannot apply fixed with less than 2 fields");
+                                }
+                                concat_start.replace(t);
+                                is_concat_start = true;
                             }
                         }
                     });
@@ -108,6 +111,36 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                     };
                     concat_calls.push(q);
 
+                    if let Some(concat_s) = concat_start.as_mut() {
+                        // if it was zero it means we failed, it must never zero.
+                        *concat_s -= 1;
+
+                        if !is_concat_start {
+                            if *concat_s == 0 {
+                                is_concat_end = true;
+                            } else {
+                                is_concat_mid = true;
+                            }
+                        }
+                    }
+
+                    if is_concat_end {
+                        concat_start.take();
+                    }
+
+                    if is_concat_start {
+                        let tokens = quote! {
+                            <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
+                        };
+                        concat_fixed_size_tokens.extend(tokens);
+                    } else if is_concat_mid || is_concat_end {
+                        let tokens = quote! {
+                           + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
+                        };
+                        concat_fixed_size_tokens.extend(tokens);
+                    }
+
+                    // we group them
                     let wiring_call = if is_concat_start {
                         quote! {
                            self.#field_name.concat_array(&mut _a_);
@@ -258,7 +291,6 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
 
                 };
-
                 return x.into();
             }
             syn::Fields::Unnamed(fields) => {
@@ -279,9 +311,15 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                 let mut ref_concat_fields_calls = Vec::new();
                 let mut sync_concat_fields_calls = Vec::new();
                 let mut concat_fixed_size_tokens = proc_macro2::TokenStream::new();
+                let fields_len = fields.unnamed.len();
+
+                let mut field_count = 0;
+                let mut concat_start: Option<usize> = None;
 
                 for (index, field) in fields.unnamed.iter().enumerate() {
+                    field_count += 1;
                     let field_name = Index::from(index);
+
                     let mut is_concat_start = false;
                     let mut is_concat_mid = false;
                     let mut is_concat_end = false;
@@ -296,38 +334,35 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
                     field.attrs.iter().for_each(|attr| {
                         // Here you check for the specific attribute that indicates the existence of a helper macro
-                        if attr.path().is_ident("concat_start") {
-                            if is_concat_mid || is_concat_end {
-                                panic!("Cannot set concat_start for field with concat_mid or concat_end");
-                            } else {
-                                is_concat_start = true;
+                        if attr.path().is_ident("fixed") {
+                            if let Meta::List(l) = attr.meta.clone() {
+                                if concat_start.is_some() {
+                                    panic!("Confilict in the fixed range")
+                                }
+                                if fields_len == 1 {
+                                    panic!("cannot apply fixed on struct with less than 2 fields");
+                                }
+                                let t = l.tokens.to_string().parse::<usize>().unwrap();
+                                if t == 1 {
+                                    panic!("cannot apply fixed with less than 2 fields");
+                                }
 
-                                let tokens = quote! {
-                                    <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
-                            }
-                        }
-                        if attr.path().is_ident("concat_mid") {
-                            if is_concat_end || is_concat_start {
-                                panic!("Cannot set concat_mid for field with concat_start or concat_end");
+                                if t > fields_len - (field_count - 1) {
+                                    panic!("cannot fixed beyond the struct length");
+                                }
+                                concat_start.replace(t);
+                                // now this is new start, so we set start flag, but we must reset it to false.
+                                is_concat_start = true;
                             } else {
-                                is_concat_mid = true;
-                                let tokens = quote! {
-                                   + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
-                            }
-                        }
-                        if attr.path().is_ident("concat_end") {
-                            if is_concat_mid || is_concat_start {
-                                panic!("Cannot set concat_end for field with concat_mid or concat_start");
-                            } else {
-                                is_concat_end = true;
-                                let tokens = quote! {
-                                    + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
-                                };
-                                concat_fixed_size_tokens.extend(tokens);
+                                if concat_start.is_some() {
+                                    panic!("Confilict in the fixed range")
+                                }
+                                let t = fields_len - (field_count - 1);
+                                if t == 1 {
+                                    panic!("cannot apply fixed with less than 2 fields");
+                                }
+                                concat_start.replace(t);
+                                is_concat_start = true;
                             }
                         }
                     });
@@ -338,6 +373,35 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
                     };
                     concat_calls.push(q);
 
+                    if let Some(concat_s) = concat_start.as_mut() {
+                        *concat_s -= 1;
+
+                        if !is_concat_start {
+                            if *concat_s == 0 {
+                                is_concat_end = true;
+                            } else {
+                                is_concat_mid = true;
+                            }
+                        }
+                    }
+
+                    if is_concat_end {
+                        concat_start.take();
+                    }
+
+                    if is_concat_start {
+                        let tokens = quote! {
+                            <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
+                        };
+                        concat_fixed_size_tokens.extend(tokens);
+                    } else if is_concat_mid || is_concat_end {
+                        let tokens = quote! {
+                           + <#field_type as wiring::prelude::Wiring>::FIXED_SIZE
+                        };
+                        concat_fixed_size_tokens.extend(tokens);
+                    }
+
+                    // we group them
                     let wiring_call = if is_concat_start {
                         quote! {
                            self.#field_name.concat_array(&mut _a_);
@@ -488,7 +552,6 @@ pub fn wiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
 
                 };
-
                 return x.into();
             }
             syn::Fields::Unit => {
@@ -1159,16 +1222,6 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
 }
 
 #[proc_macro_attribute]
-pub fn concat_start(_attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    item
-}
-
-#[proc_macro_attribute]
-pub fn concat_mid(_attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    item
-}
-
-#[proc_macro_attribute]
-pub fn concat_end(_attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn fixed(_attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     item
 }

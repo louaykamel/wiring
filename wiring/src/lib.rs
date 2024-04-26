@@ -14,5 +14,5 @@ pub mod prelude {
         wired::{WiredHandle, WiredServer},
         BufStream, BufStreamConfig, ConnectConfig, SplitStream, TcpStreamConfig,
     };
-    pub use wiring_derive::{concat_end, concat_mid, concat_start, Unwiring, Wiring};
+    pub use wiring_derive::{Unwiring, Wiring};
 }
