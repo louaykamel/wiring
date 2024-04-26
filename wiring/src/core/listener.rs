@@ -49,8 +49,8 @@ where
                             wire_id = rand::random();
                         }
                         let wire_info = WireInfo::new(wire_id, access_key, self.connect_info.clone());
-
-                        if let Err(e) = Some(&wire_info).wiring(&mut wire).await {
+                        let info = Some(wire_info);
+                        if let Err(e) = info.wiring_ref(&mut wire).await {
                             reply.send(Err(e)).ok();
                             continue;
                         } else {
@@ -59,6 +59,7 @@ where
                                 continue;
                             };
                         }
+                        let wire_info = info.unwrap();
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         let local = Local::new(wire_info, rx);
                         let wire = wire.with_local(local);
@@ -88,7 +89,7 @@ where
                         }
                         let wire_info = WireInfo::new(wire_id, access_key, self.connect_info.clone());
 
-                        wire.wire(&wire_info).await.ok();
+                        wire.wire_ref(&wire_info).await.ok();
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         let local = Local::new(wire_info, rx);
 
@@ -237,32 +238,50 @@ impl Wiring for ConnectInfo {
         async move {
             match self {
                 Self::TcpStream(string) => {
-                    string.wiring(wire).await?;
-                }
-                Self::Url(url) => {
-                    url.wiring(wire).await?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-impl<'a> Wiring for &'a ConnectInfo {
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            match self {
-                ConnectInfo::TcpStream(string) => {
                     0u8.wiring(wire).await?;
                     string.wiring(wire).await?;
                 }
-                ConnectInfo::Url(url) => {
+                Self::Url(url) => {
                     1u8.wiring(wire).await?;
                     url.wiring(wire).await?;
                 }
             }
             Ok(())
         }
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            match self {
+                Self::TcpStream(string) => {
+                    0u8.wiring_ref(wire).await?;
+                    string.wiring_ref(wire).await?;
+                }
+                Self::Url(url) => {
+                    1u8.wiring_ref(wire).await?;
+                    url.wiring_ref(wire).await?;
+                }
+            }
+            Ok(())
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: std::io::prelude::Write,
+    {
+        match self {
+            Self::TcpStream(string) => {
+                0u8.sync_wiring(wire)?;
+                string.sync_wiring(wire)?;
+            }
+            Self::Url(url) => {
+                1u8.sync_wiring(wire)?;
+                url.sync_wiring(wire)?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -73,7 +73,7 @@ async fn client(connect_info: ConnectInfo) {
 }
 
 #[derive(Debug, Wiring, Unwiring)]
-pub enum ClientRequest {
+enum ClientRequest {
     EchoMessage {
         reply: oneshot::Sender<String>,
         request: String,

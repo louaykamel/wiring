@@ -1,4 +1,10 @@
-use std::{any::TypeId, fmt::Debug, ops::Deref, pin::Pin, task::Poll};
+use std::{
+    fmt::Debug,
+    io::{Error, ErrorKind, Write},
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+};
 
 use futures::{FutureExt, StreamExt};
 use pin_project::pin_project;
@@ -56,7 +62,7 @@ impl Unwiring for WireInfo {
     }
 }
 
-pub trait Wire: AsyncWrite + Unpin + Send + 'static + Sync + Sized {
+pub trait Wire: AsyncWrite + Unpin + Send + Sync + Sized {
     type Stream: SplitStream;
     fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send;
     fn wire<T: Wiring>(&mut self, t: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
@@ -66,8 +72,137 @@ pub trait Wire: AsyncWrite + Unpin + Send + 'static + Sync + Sized {
             Ok(())
         }
     }
+    fn wire_ref<T: Wiring>(&mut self, t: &T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            t.wiring_ref(self).await?;
+            self.flush().await?;
+            Ok(())
+        }
+    }
+    #[inline]
+    fn sync_wire<T: Wiring>(&mut self, t: &T) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        t.sync_wiring(self)?;
+        self.flush()?;
+        Ok(())
+    }
+    #[inline]
+    fn sync_wire_f32(&mut self, n: &f32) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.write_all(&n.to_be_bytes())
+    }
+    #[inline]
+    fn sync_wire_u64(&mut self, n: &u64) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.write_all(&n.to_be_bytes())
+    }
+    #[inline]
+    fn sync_wire_all<const CHECK: bool>(&mut self, bytes: &[u8]) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.write_all(bytes)
+    }
+    /// Reserve capacity on the underlaying wire if it does allow it.
+    #[allow(dead_code)]
+    fn reserve_capacity(&mut self, _add: usize) {}
     fn wiring<T: Wiring>(&mut self, item: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         item.wiring(self)
+    }
+}
+
+/// It converts the wire to unchecked.
+#[pin_project::pin_project]
+struct Unchecked<'a, T: Wire> {
+    #[pin]
+    wire: &'a mut T,
+}
+
+impl<'a, T: Wire> AsyncWrite for Unchecked<'a, T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let p = self.project();
+        p.wire.poll_write(cx, buf)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.wire.is_write_vectored()
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        let p = self.project();
+        p.wire.poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        let p = self.project();
+        p.wire.poll_shutdown(cx)
+    }
+}
+
+impl<'a, T: std::io::Write + Wire> Write for Unchecked<'a, T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.wire.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.wire.flush()
+    }
+}
+
+impl<'a, W: Wire + std::io::Write> Wire for Unchecked<'a, W> {
+    type Stream = TcpStream;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from Unchecked wire",
+            ))
+        }
+    }
+    #[inline]
+    fn wire<T: Wiring>(&mut self, t: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(&t);
+        async move { r }
+    }
+    #[inline]
+    fn wire_ref<T: Wiring>(&mut self, t: &T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(t);
+        async move { r }
+    }
+    #[inline]
+    fn sync_wire<T: Wiring>(&mut self, t: &T) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        t.sync_wiring(self)
+    }
+    #[inline(always)]
+    fn sync_wire_f32(&mut self, n: &f32) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.wire.sync_wire_f32(n)
+    }
+    #[inline]
+    fn sync_wire_u64(&mut self, n: &u64) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.wire.sync_wire_u64(n)
+    }
+    #[inline(always)]
+    fn sync_wire_all<const CHECK: bool>(&mut self, bytes: &[u8]) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        // Unchecked wrapper enforce nocheck.
+        self.wire.sync_wire_all::<false>(bytes)
     }
 }
 
@@ -81,6 +216,88 @@ impl Wire for Vec<u8> {
             ))
         }
     }
+    #[inline]
+    fn wire<T: Wiring>(&mut self, t: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(&t);
+        async move { r }
+    }
+    #[inline]
+    fn wire_ref<T: Wiring>(&mut self, t: &T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(t);
+        async move { r }
+    }
+    #[inline]
+    fn sync_wire<T: Wiring>(&mut self, t: &T) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        t.sync_wiring(self)
+    }
+    #[inline(always)]
+    fn sync_wire_f32(&mut self, n: &f32) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.extend_from_slice(&n.to_be_bytes());
+        Ok(())
+    }
+    #[inline]
+    fn sync_wire_u64(&mut self, n: &u64) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        self.extend_from_slice(&n.to_be_bytes());
+        Ok(())
+    }
+    #[inline(always)]
+    fn sync_wire_all<const CHECK: bool>(&mut self, bytes: &[u8]) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        if CHECK {
+            self.extend_from_slice(bytes);
+        } else {
+            let bl = bytes.len();
+            let l = self.len();
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.as_mut_ptr().add(l), bl);
+                self.set_len(l + bl);
+            }
+        }
+        Ok(())
+    }
+    #[inline]
+    fn reserve_capacity(&mut self, add: usize) {
+        self.reserve(add)
+    }
+}
+
+impl<'a> Wire for std::io::Cursor<&'a mut [u8]> {
+    type Stream = TcpStream;
+    fn stream(&mut self) -> impl std::future::Future<Output = Result<Self::Stream, std::io::Error>> + Send {
+        async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot to establish stream from std::io::Cursor<_>",
+            ))
+        }
+    }
+    fn wire<T: Wiring>(&mut self, t: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(&t);
+        async move { r }
+    }
+    fn wire_ref<T: Wiring>(&mut self, t: &T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(t);
+        async move { r }
+    }
+    #[inline]
+    fn sync_wire<T: Wiring>(&mut self, t: &T) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        t.sync_wiring(self)?;
+        std::io::Write::flush(self)
+    }
 }
 
 impl Wire for std::io::Cursor<Vec<u8>> {
@@ -92,6 +309,22 @@ impl Wire for std::io::Cursor<Vec<u8>> {
                 "Cannot to establish stream from std::io::Cursor<Vec<u8>>",
             ))
         }
+    }
+    fn wire<T: Wiring>(&mut self, t: T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(&t);
+        async move { r }
+    }
+    fn wire_ref<T: Wiring>(&mut self, t: &T) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let r = self.sync_wire(t);
+        async move { r }
+    }
+    #[inline]
+    fn sync_wire<T: Wiring>(&mut self, t: &T) -> Result<(), std::io::Error>
+    where
+        Self: Write,
+    {
+        t.sync_wiring(self)?;
+        std::io::Write::flush(self)
     }
 }
 
@@ -580,12 +813,149 @@ impl<C: ConnectConfig> WireConfig<C, tokio::sync::mpsc::UnboundedSender<WireList
     }
 }
 
-pub trait Wiring: Send + Sync {
+pub trait Wiring: Send + Sync + Sized {
     const SAFE: bool = true;
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send;
+
+    const FIXED_SIZE: usize = 0;
+    /// Indicates if type is mixed of dynamic and fixed fields.
+    const MIXED: bool = true;
+    #[allow(unused)]
+    fn concat_array(&self, buf: &mut [u8]) {}
+
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move { self.wiring_ref(wire).await }
+    }
+    fn wiring_ref<W: Wire>(&self, wire: &mut W)
+        -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send;
+    fn wiring_slice<W: Wire>(
+        slice: &[Self],
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let len = slice.len();
+            len.wiring(wire).await?;
+            for i in slice {
+                i.wiring_ref(wire).await?;
+            }
+            Ok(())
+        }
+    }
+
+    fn wiring_vec<W: Wire>(
+        v: Vec<Self>,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let len = v.len();
+            len.wiring(wire).await?;
+            for i in v {
+                i.wiring(wire).await?;
+            }
+            Ok(())
+        }
+    }
+    #[inline]
+    fn wiring_array_ref<W: Wire, const N: usize>(
+        array: &[Self; N],
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            for i in array {
+                i.wiring_ref(wire).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn wiring_array<W: Wire, const N: usize>(
+        array: [Self; N],
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            for i in array {
+                i.wiring(wire).await?;
+            }
+            Ok(())
+        }
+    }
+
+    fn wiring_arc<W: Wire>(
+        arc: Arc<Self>,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            // we simply use ref here
+            let r = arc.as_ref();
+            r.wiring_ref(wire).await
+        }
+    }
+
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write;
+    #[inline]
+    fn sync_wiring_array<W: Wire, const N: usize>(array: &[Self; N], wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        for i in array {
+            i.sync_wiring(wire)?;
+        }
+        Ok(())
+    }
+    #[inline]
+    fn sync_wiring_slice<W: Wire>(slice: &[Self], wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let len = slice.len();
+        len.sync_wiring(wire)?;
+        if Self::MIXED {
+            for i in slice {
+                i.sync_wiring(wire)?;
+            }
+        } else {
+            // the type is fixed and we know the total size, so we reserve one time
+            let add = len * Self::FIXED_SIZE;
+            // reserve capcaity to ensure unsafe operation without boundchecks are safe
+            wire.reserve_capacity(add);
+            let mut unchecked = Unchecked { wire };
+            for i in slice {
+                i.sync_wiring(&mut unchecked)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+impl Wiring for usize {
+    const FIXED_SIZE: usize = 8;
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        (self as u64).wiring(wire)
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        (*self as u64).wiring(wire)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        (*self as u64).sync_wiring(wire)
+    }
+
+    fn concat_array(&self, buf: &mut [u8]) {
+        let r = (*self as u64).to_be_bytes();
+        buf[..8].copy_from_slice(&r);
+    }
 }
 
 impl Wiring for WireInfo {
+    const FIXED_SIZE: usize = 0;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
@@ -594,30 +964,50 @@ impl Wiring for WireInfo {
             self.connect_info.wiring(wire).await
         }
     }
-}
-
-impl<'a> Wiring for &'a WireInfo {
     #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
-            self.wire_id.wiring(wire).await?;
-            self.access_key.wiring(wire).await?;
-            (&self.connect_info).wiring(wire).await
+            self.wire_id.wiring_ref(wire).await?;
+            self.access_key.wiring_ref(wire).await?;
+            self.connect_info.wiring_ref(wire).await
         }
     }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        self.wire_id.sync_wiring(wire)?;
+        self.access_key.sync_wiring(wire)?;
+        self.connect_info.sync_wiring(wire)
+    }
+    #[allow(unused)]
+    fn concat_array(&self, buf: &mut [u8]) {}
 }
 
 impl Wiring for String {
-    #[inline]
+    const FIXED_SIZE: usize = 0;
+
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
     }
-}
-
-impl<'a> Wiring for &'a String {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let b = self.as_bytes();
+        b.len().sync_wiring(wire)?;
+        wire.sync_wire_all::<true>(b)
     }
 }
 
@@ -626,6 +1016,19 @@ impl<'a> Wiring for &'a str {
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_bytes().wiring(wire).await }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move { self.as_bytes().wiring(wire).await }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        self.as_bytes().sync_wiring(wire)
+    }
 }
 
 impl Wiring for char {
@@ -633,76 +1036,89 @@ impl Wiring for char {
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { (self as u32).wiring(wire).await }
     }
-}
-
-impl<'a, T: Send + Sync + 'static> Wiring for &'a [T]
-where
-    &'a T: Wiring,
-{
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            let len = self.len() as u64;
-            len.wiring(wire).await?;
-            let t = TypeId::of::<T>();
-            let is_u8 = TypeId::of::<u8>();
-            if t == is_u8 {
-                let slice = unsafe { std::mem::transmute::<_, &'a [u8]>(self) };
-                wire.write_all(slice).await?;
-            } else {
-                for t in self {
-                    t.wiring(wire).await?;
-                }
-            }
-            Ok(())
-        }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        (*self as u32).wiring(wire)
+    }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        (*self as u32).sync_wiring(wire)
     }
 }
 
-impl<'a, T: Wiring + 'static, const LEN: usize> Wiring for &'a [T; LEN]
-where
-    &'a T: Wiring,
-{
-    #[inline]
+impl<'a, T: Wiring> Wiring for &'a [T] {
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            {
-                let t = TypeId::of::<T>();
-                let is_u8 = TypeId::of::<u8>();
-                let is_i8 = TypeId::of::<i8>();
-                let is_bool = TypeId::of::<bool>();
-                if t == is_u8 || t == is_i8 || t == is_bool {
-                    let vec = unsafe { std::mem::transmute_copy::<_, [u8; LEN]>(&self) };
-                    wire.write_all(vec.as_slice()).await?;
-                } else {
-                    for t in self {
-                        t.wiring(wire).await?;
-                    }
-                }
-                Ok(())
-            }
-        }
+        T::wiring_slice(self, wire)
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        T::wiring_slice(*self, wire)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        T::sync_wiring_slice(*self, wire)
     }
 }
 
-impl<T: Wiring + 'static, const LEN: usize> Wiring for [T; LEN] {
+impl<'a, T: Wiring + 'static, const LEN: usize> Wiring for &'a [T; LEN] {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            {
-                let t = TypeId::of::<T>();
-                let is_u8 = TypeId::of::<u8>();
-                let is_i8 = TypeId::of::<i8>();
-                let is_bool = TypeId::of::<bool>();
-                if t == is_u8 || t == is_i8 || t == is_bool {
-                    let vec = unsafe { std::mem::transmute_copy::<_, [u8; LEN]>(&self) };
-                    wire.write_all(vec.as_slice()).await?;
-                } else {
-                    for t in self {
-                        t.wiring(wire).await?;
-                    }
-                }
-                Ok(())
-            }
+        T::wiring_array_ref(self, wire)
+    }
+
+    #[inline]
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        T::wiring_array_ref(*self, wire)
+    }
+
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        T::sync_wiring_array(self, wire)
+    }
+}
+
+impl<T: Wiring, const LEN: usize> Wiring for [T; LEN] {
+    const FIXED_SIZE: usize = T::FIXED_SIZE * LEN;
+    const MIXED: bool = T::MIXED;
+    #[inline]
+    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        T::wiring_array(self, wire)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        T::sync_wiring_array(self, wire)
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        T::wiring_array_ref(self, wire)
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        let mut start = 0;
+        for elem in self.iter() {
+            let end = start + T::FIXED_SIZE;
+            elem.concat_array(&mut buf[start..end]);
+            start = end;
         }
     }
 }
@@ -712,12 +1128,17 @@ impl Wiring for Url {
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_str().wiring(wire).await }
     }
-}
-
-impl<'a> Wiring for &'a Url {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move { self.as_str().wiring(wire).await }
+    }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        self.as_str().sync_wiring(wire)
     }
 }
 
@@ -745,6 +1166,20 @@ where
             tokio::spawn(task.boxed());
             Ok(())
         }
+    }
+    fn wiring_ref<W: Wire>(&self, _: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wiring oneshot sender by ref is not support",
+            ))
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Wiring oneshot sender by ref is not supported",
+        ))
     }
 }
 
@@ -776,6 +1211,19 @@ where
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        let s = self.clone();
+        async move { s.wiring(wire).await }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync wiring unboundedsender by ref is not supported",
+        ))
+    }
 }
 
 impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::broadcast::Receiver<T> {
@@ -805,6 +1253,20 @@ impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::broadcast::Receiver<T>
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(&self, _: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wiring broadcast receiver by ref is not supported",
+            ))
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync Wiring broadcast receiver by ref is not supported",
+        ))
+    }
 }
 
 impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::watch::Receiver<T> {
@@ -831,6 +1293,21 @@ impl<T: Wiring + 'static + Clone> Wiring for tokio::sync::watch::Receiver<T> {
             tokio::spawn(detect_shutdown.boxed());
             Ok(())
         }
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let r = self.clone();
+            r.wiring(wire).await
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync Wiring watch receiver by ref is not supported",
+        ))
     }
 }
 
@@ -869,6 +1346,21 @@ impl<T: Wiring + Unwiring + 'static + Clone> Wiring for tokio::sync::watch::Send
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let s = self.clone();
+            s.wiring(wire).await
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync wiring watch sender is not supported",
+        ))
+    }
 }
 
 impl<T> Wiring for tokio::sync::broadcast::Sender<T>
@@ -890,6 +1382,21 @@ where
             tokio::spawn(task.boxed());
             Ok(())
         }
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let s = self.clone();
+            s.wiring(wire).await
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Wiring broadcast sender is not supported",
+        ))
     }
 }
 
@@ -921,6 +1428,21 @@ where
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let s = self.clone();
+            s.wiring(wire).await
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync wiring mpsc sender is not supported",
+        ))
+    }
 }
 
 impl<T: Wiring + 'static> Wiring for tokio::sync::oneshot::Receiver<T> {
@@ -948,6 +1470,20 @@ impl<T: Wiring + 'static> Wiring for tokio::sync::oneshot::Receiver<T> {
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(&self, _: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wiring oneshot receiver by ref is not supported",
+            ))
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync Wiring oneshot receiver is not supported",
+        ))
+    }
 }
 
 impl<T: Wiring + 'static> Wiring for UnboundedReceiver<T> {
@@ -973,6 +1509,20 @@ impl<T: Wiring + 'static> Wiring for UnboundedReceiver<T> {
             tokio::spawn(detect_shutdown.boxed());
             Ok(())
         }
+    }
+    fn wiring_ref<W: Wire>(&self, _: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wiring unbounded receiver by ref is not supported",
+            ))
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync Wiring unbounded receiver is not supported",
+        ))
     }
 }
 
@@ -1001,6 +1551,20 @@ impl<T: Wiring + 'static> Wiring for tokio::sync::mpsc::Receiver<T> {
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(&self, _: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wiring bounded receiver by ref is not supported",
+            ))
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, _: &mut W) -> Result<(), std::io::Error> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Sync Wiring bounded receiver is not supported",
+        ))
+    }
 }
 
 impl Wiring for () {
@@ -1011,213 +1575,413 @@ impl Wiring for () {
         // if it was no-op, then no way for unwire to detect it. think of it as heartbeat.
         wire.wiring(0u8)
     }
-}
-
-impl<'a> Wiring for &'a () {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        0u8.wiring(wire)
+    }
     #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        wire.wiring(0u8)
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        0u8.sync_wiring(wire)
     }
 }
 
 impl Wiring for bool {
+    const FIXED_SIZE: usize = 1;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u8(self as u8)
     }
-}
-
-impl<'a> Wiring for &'a bool {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u8(*self as u8)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        (*self as u8).sync_wiring(wire)
+    }
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[0] = *self as u8;
     }
 }
 
 impl Wiring for u8 {
+    const FIXED_SIZE: usize = 1;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u8(self)
     }
-}
-
-impl<'a> Wiring for &'a u8 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u8(*self)
+    }
+    fn wiring_slice<W: Wire>(
+        slice: &[Self],
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            slice.len().wiring(wire).await?;
+            wire.write_all(slice).await
+        }
+    }
+    fn wiring_array<W: Wire, const N: usize>(
+        array: [Self; N],
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move { wire.write_all(&array).await }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&[*self])
+    }
+    #[inline(always)]
+    fn sync_wiring_slice<W: Wire>(slice: &[Self], wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        slice.len().sync_wiring(wire)?;
+        wire.sync_wire_all::<true>(slice)
+    }
+    #[inline]
+    fn sync_wiring_array<W: Wire, const N: usize>(array: &[Self; N], wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(array)
+    }
+
+    #[inline(always)]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[0] = *self;
     }
 }
 
 impl Wiring for i8 {
+    const FIXED_SIZE: usize = 1;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i8(self)
     }
-}
-
-impl<'a> Wiring for &'a i8 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_i8(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&[*self as u8])
+    }
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[0] = *self as u8
     }
 }
 
 impl Wiring for u16 {
+    const FIXED_SIZE: usize = 2;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u16(self)
     }
-}
-
-impl<'a> Wiring for &'a u16 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u16(*self)
+    }
+    #[inline(always)]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline(always)]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..2].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for i16 {
+    const FIXED_SIZE: usize = 2;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i16(self)
     }
-}
-
-impl<'a> Wiring for &'a i16 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_i16(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..2].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for u32 {
+    const FIXED_SIZE: usize = 4;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u32(self)
     }
-}
-
-impl<'a> Wiring for &'a u32 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u32(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn sync_wiring_array<W: Wire, const N: usize>(array: &[Self; N], wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        // we inilize the t_be_bytes for the array and do it in one go?
+        let c = array.map(|n| n.to_be_bytes());
+        // instead we concat them
+        let r = c.as_slice().flatten();
+        wire.sync_wire_all::<true>(r)?;
+        Ok(())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for i32 {
+    const FIXED_SIZE: usize = 4;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i32(self)
     }
-}
-
-impl<'a> Wiring for &'a i32 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_i32(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.write_all(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for f32 {
+    const FIXED_SIZE: usize = 4;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_f32(self)
     }
-}
-
-impl<'a> Wiring for &'a f32 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_f32(*self)
+    }
+    #[inline(always)]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        // wire.write_all(&self.to_be_bytes())
+        wire.sync_wire_f32(self)
+    }
+    #[inline(always)]
+    fn concat_array(&self, buf: &mut [u8]) {
+        // let bl = bytes.len();
+        // self.reserve(bl);
+        // let l = self.len();
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.to_be_bytes().as_ptr(), buf.as_mut_ptr(), 4);
+        }
+
+        // buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for u64 {
+    const FIXED_SIZE: usize = 8;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u64(self)
     }
-}
-
-impl<'a> Wiring for &'a u64 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u64(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        // wire.write_all(&self.to_be_bytes())
+        // wire.sync_wire_all(&self.to_be_bytes())
+        wire.sync_wire_u64(self)
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for i64 {
+    const FIXED_SIZE: usize = 8;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i64(self)
     }
-}
-
-impl<'a> Wiring for &'a i64 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_i64(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for f64 {
+    const FIXED_SIZE: usize = 8;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_f64(self)
     }
-}
-
-impl<'a> Wiring for &'a f64 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_f64(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for u128 {
+    const FIXED_SIZE: usize = 16;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_u128(self)
     }
-}
-
-impl<'a> Wiring for &'a u128 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_u128(*self)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl Wiring for i128 {
+    const FIXED_SIZE: usize = 16;
+    const MIXED: bool = false;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         wire.write_i128(self)
     }
-}
-
-impl<'a> Wiring for &'a i128 {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         wire.write_i128(*self)
     }
-}
-
-impl<'a, T: Send + Sync + 'static> Wiring for &'a Box<[T]>
-where
-    &'a T: Wiring,
-{
     #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move {
-            let vec = &**self;
-            vec.wiring(wire).await
-        }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        wire.sync_wire_all::<true>(&self.to_be_bytes())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        buf[..std::mem::size_of::<Self>()].copy_from_slice(&self.to_be_bytes())
     }
 }
 
 impl<T> Wiring for Box<[T]>
 where
-    T: Wiring + 'static,
+    for<'a> T: Wiring + 'a,
 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
@@ -1226,11 +1990,28 @@ where
             vec.wiring(wire).await
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let vec = &**self;
+            vec.wiring(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let vec = &**self;
+        vec.sync_wiring(wire)
+    }
 }
 
 impl<T> Wiring for Box<T>
 where
-    T: Wiring + 'static,
+    for<'a> T: Wiring + 'a,
 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
@@ -1239,74 +2020,70 @@ where
             inner.wiring(wire).await
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            let inner = &**self;
+            inner.wiring_ref(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let inner = &**self;
+        inner.sync_wiring(wire)
+    }
 }
 
 impl<T> Wiring for std::sync::Arc<T>
 where
-    T: Wiring + Clone,
+    T: Wiring,
 {
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
-        async move { (*self).clone().wiring(wire).await }
+        T::wiring_arc(self, wire)
     }
-}
-
-impl<'a, T: Wiring> Wiring for &'a std::sync::Arc<T>
-where
-    &'a T: Wiring,
-{
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
-        async move { self.deref().wiring(wire).await }
-    }
-}
-
-impl<T: Wiring + 'static> Wiring for Vec<T> {
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
-            let len = self.len() as u64;
-            len.wiring(wire).await?;
-            let t = TypeId::of::<T>();
-            let is_u8 = TypeId::of::<u8>();
-            let is_i8 = TypeId::of::<i8>();
-            if t == is_u8 || t == is_i8 {
-                let vec = unsafe { std::mem::transmute::<_, Vec<u8>>(self) };
-                wire.write_all(vec.as_slice()).await?;
-            } else {
-                for t in self {
-                    t.wiring(wire).await?;
-                }
-            }
-            Ok(())
+            let r = self.as_ref();
+            r.wiring_ref(wire).await
         }
     }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let r = self.as_ref();
+        r.sync_wiring(wire)
+    }
 }
 
-impl<'a, T: Wiring + 'static> Wiring for &'a Vec<T>
-where
-    &'a T: Wiring,
-{
+impl<T: Wiring> Wiring for Vec<T> {
+    const FIXED_SIZE: usize = 0;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
-        async move {
-            let len = self.len() as u64;
-            len.wiring(wire).await?;
-            let t = TypeId::of::<T>();
-            let is_u8 = TypeId::of::<u8>();
-            let is_i8 = TypeId::of::<i8>();
-            if t == is_u8 || t == is_i8 {
-                let vec = unsafe { std::mem::transmute::<_, &'a Vec<u8>>(self) };
-                wire.write_all(vec.as_slice()).await?;
-            } else {
-                let mut i = self.iter();
-
-                while let Some(t) = i.next() {
-                    t.wiring(wire).await?;
-                }
-            }
-            Ok(())
-        }
+        T::wiring_vec(self, wire)
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        T::wiring_slice(self, wire)
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        T::sync_wiring_slice(self, wire)
     }
 }
 
@@ -1323,23 +2100,31 @@ impl<T: Wiring> Wiring for std::collections::HashSet<T> {
             Ok(())
         }
     }
-}
-
-impl<'a, T: Wiring> Wiring for &'a std::collections::HashSet<T>
-where
-    &'a T: Wiring + std::fmt::Debug,
-{
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
-        let mut i = self.iter();
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
-            let len = self.len() as u64;
+            let len = self.len();
             len.wiring(wire).await?;
-            while let Some(t) = i.next() {
-                t.wiring(wire).await?;
+            let mut s = self.iter();
+            while let Some(t) = s.next() {
+                t.wiring_ref(wire).await?;
             }
             Ok(())
         }
+    }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        let len = self.len();
+        len.sync_wiring(wire)?;
+        let mut s = self.iter();
+        while let Some(t) = s.next() {
+            t.sync_wiring(wire)?;
+        }
+        Ok(())
     }
 }
 
@@ -1355,29 +2140,40 @@ impl<T: Wiring> Wiring for Option<T> {
             }
         }
     }
-}
-
-impl<'a, T: Wiring> Wiring for &'a Option<T>
-where
-    &'a T: Wiring,
-{
-    #[inline]
-    fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
         async move {
-            if self.is_none() {
-                0u8.wiring(wire).await?;
-            } else {
-                1u8.wiring(wire).await?;
-            };
             if let Some(t) = self {
-                t.wiring(wire).await?;
+                1u8.wiring(wire).await?;
+                t.wiring_ref(wire).await
+            } else {
+                0u8.wiring(wire).await
             }
-            Ok(())
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        if let Some(t) = self {
+            1u8.sync_wiring(wire)?;
+            t.sync_wiring(wire)
+        } else {
+            0u8.sync_wiring(wire)
         }
     }
 }
 
-impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
+#[cfg(feature = "generic_const_exprs")]
+impl<T: Wiring, TT: Wiring> Wiring for (T, TT)
+where
+    [(); T::FIXED_SIZE + TT::FIXED_SIZE]:,
+{
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE;
+    const MIXED: bool = T::MIXED || T::MIXED;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
@@ -1385,23 +2181,80 @@ impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
             self.1.wiring(wire).await
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            (&self.0).wiring_ref(wire).await?;
+            (&self.1).wiring_ref(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        // if both T and TT are fixed, we better concate them.
+        if !T::MIXED && !TT::MIXED {
+            let mut buf = [0u8; T::FIXED_SIZE + TT::FIXED_SIZE];
+            self.concat_array(&mut buf);
+            wire.sync_wire_all::<true>(&buf)?;
+        } else {
+            (&self.0).sync_wiring(wire)?;
+            (&self.1).sync_wiring(wire)?;
+        }
+        Ok(())
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        let (left, buf) = buf.split_at_mut(T::FIXED_SIZE);
+        self.0.concat_array(left);
+        self.1.concat_array(buf);
+    }
 }
-
-impl<'a, T: Wiring, TT: Wiring> Wiring for &'a (T, TT)
-where
-    &'a T: Wiring,
-    &'a TT: Wiring,
-{
+#[cfg(not(feature = "generic_const_exprs"))]
+impl<T: Wiring, TT: Wiring> Wiring for (T, TT) {
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE;
+    const MIXED: bool = T::MIXED || T::MIXED;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
-            (&self.0).wiring(wire).await?;
-            (&self.1).wiring(wire).await
+            self.0.wiring(wire).await?;
+            self.1.wiring(wire).await
         }
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            (&self.0).wiring_ref(wire).await?;
+            (&self.1).wiring_ref(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        (&self.0).sync_wiring(wire)?;
+        (&self.1).sync_wiring(wire)
+    }
+    #[inline]
+    fn concat_array(&self, buf: &mut [u8]) {
+        let (left, buf) = buf.split_at_mut(T::FIXED_SIZE);
+        self.0.concat_array(left);
+        self.1.concat_array(buf);
     }
 }
 
-impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
+#[cfg(feature = "generic_const_exprs")]
+impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT)
+where
+    [(); T::FIXED_SIZE + TT::FIXED_SIZE + TTT::FIXED_SIZE]:,
+{
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE + TTT::FIXED_SIZE;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
@@ -1410,20 +2263,96 @@ impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
             self.2.wiring(wire).await
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            (&self.0).wiring_ref(wire).await?;
+            (&self.1).wiring_ref(wire).await?;
+            (&self.2).wiring_ref(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        if !T::MIXED && !TT::MIXED && !TTT::MIXED {
+            let mut buf = [0u8; T::FIXED_SIZE + TT::FIXED_SIZE + TTT::FIXED_SIZE];
+            self.concat_array(&mut buf);
+            wire.sync_wire_all::<true>(&buf)?;
+        } else {
+            (&self.0).sync_wiring(wire)?;
+            (&self.1).sync_wiring(wire)?;
+            (&self.2).sync_wiring(wire)?;
+        }
+        Ok(())
+    }
+    #[inline(always)]
+    fn concat_array(&self, buf: &mut [u8]) {
+        self.0.concat_array(&mut buf[..T::FIXED_SIZE]);
+        self.1
+            .concat_array(&mut buf[T::FIXED_SIZE..T::FIXED_SIZE + TT::FIXED_SIZE]);
+        self.2.concat_array(&mut buf[T::FIXED_SIZE + TT::FIXED_SIZE..]);
+    }
 }
 
-impl<'a, T: Wiring, TT: Wiring, TTT: Wiring> Wiring for &'a (T, TT, TTT)
-where
-    &'a T: Wiring,
-    &'a TT: Wiring,
-    &'a TTT: Wiring,
-{
+#[cfg(not(feature = "generic_const_exprs"))]
+impl<T: Wiring, TT: Wiring, TTT: Wiring> Wiring for (T, TT, TTT) {
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE + TTT::FIXED_SIZE;
     #[inline]
     fn wiring<W: Wire>(self, wire: &mut W) -> impl std::future::Future<Output = Result<(), std::io::Error>> {
         async {
-            (&self.0).wiring(wire).await?;
-            (&self.1).wiring(wire).await?;
-            (&self.2).wiring(wire).await
+            self.0.wiring(wire).await?;
+            self.1.wiring(wire).await?;
+            self.2.wiring(wire).await
         }
+    }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            (&self.0).wiring_ref(wire).await?;
+            (&self.1).wiring_ref(wire).await?;
+            (&self.2).wiring_ref(wire).await
+        }
+    }
+    #[inline]
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: Write,
+    {
+        (&self.0).sync_wiring(wire)?;
+        (&self.1).sync_wiring(wire)?;
+        (&self.2).sync_wiring(wire)
+    }
+    #[inline(always)]
+    fn concat_array(&self, buf: &mut [u8]) {
+        self.0.concat_array(&mut buf[..T::FIXED_SIZE]);
+        self.1
+            .concat_array(&mut buf[T::FIXED_SIZE..T::FIXED_SIZE + TT::FIXED_SIZE]);
+        self.2.concat_array(&mut buf[T::FIXED_SIZE + TT::FIXED_SIZE..]);
+    }
+}
+
+/// BufWire is in memory fast buffer/wire
+pub struct BufWire<'a> {
+    wire: &'a mut Vec<u8>,
+}
+
+impl<'a> BufWire<'a> {
+    /// Create new buffer, it also set the len to zero.
+    pub fn new(wire: &'a mut Vec<u8>) -> Self {
+        // the moment we take the wire we set the len to be zero.
+        unsafe {
+            wire.set_len(0);
+        }
+        Self { wire }
+    }
+    /// Wire value T to the bufwire
+    pub fn wire<T: Wiring>(&'a mut self, value: &T) -> Result<(), std::io::Error> {
+        self.wire.sync_wire(value)
     }
 }

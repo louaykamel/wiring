@@ -559,6 +559,62 @@ impl<T: Wiring> Wiring for WiringEvent<T> {
             Ok(())
         }
     }
+    fn wiring_ref<W: Wire>(
+        &self,
+        wire: &mut W,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>> + Send {
+        async move {
+            match self {
+                Self::Event(event) => {
+                    0u8.wiring(wire).await?;
+                    event.wiring_ref(wire).await?;
+                }
+                Self::Message {
+                    stream_id,
+                    local,
+                    message,
+                } => {
+                    1u8.wiring(wire).await?;
+                    stream_id.wiring_ref(wire).await?;
+                    local.wiring_ref(wire).await?;
+                    message.wiring_ref(wire).await?;
+                }
+                Self::Drop { stream_id, local } => {
+                    2u8.wiring(wire).await?;
+                    stream_id.wiring_ref(wire).await?;
+                    local.wiring_ref(wire).await?;
+                }
+            }
+            Ok(())
+        }
+    }
+    fn sync_wiring<W: Wire>(&self, wire: &mut W) -> Result<(), std::io::Error>
+    where
+        W: std::io::prelude::Write,
+    {
+        match self {
+            Self::Event(event) => {
+                0u8.sync_wiring(wire)?;
+                event.sync_wiring(wire)?;
+            }
+            Self::Message {
+                stream_id,
+                local,
+                message,
+            } => {
+                1u8.sync_wiring(wire)?;
+                stream_id.sync_wiring(wire)?;
+                local.sync_wiring(wire)?;
+                message.sync_wiring(wire)?;
+            }
+            Self::Drop { stream_id, local } => {
+                2u8.sync_wiring(wire)?;
+                stream_id.sync_wiring(wire)?;
+                local.sync_wiring(wire)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<T: Unwiring> Unwiring for WiringEvent<T> {

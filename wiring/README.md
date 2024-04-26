@@ -20,7 +20,7 @@ Wiring provides a procedural macros `Wiring, Unwiring` to facilitate the automat
 #[derive(Wiring, Unwiring)]
 #[tag(u8)]
 enum MyEnum {
-    VariantOne,
+    VariantOne { reply: tokio::sync::oneshot::Sender<()>, request: String, },
     VariantN,
 }
 ```
@@ -39,7 +39,7 @@ To include Wiring in your Rust project, add the following to your `Cargo.toml` f
 
 ```toml
 [dependencies]
-wiring = "0.1"
+wiring = "0.2"
 ```
 Check [https://github.com/louaykamel/wiring/tree/master/examples](examples) folder.
 

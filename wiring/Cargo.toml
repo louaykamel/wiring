@@ -18,4 +18,21 @@ url = "2.5"
 pin-project = "1.1"
 tokio-stream = {version = "0.1", features = ["sync"]}
 
-wiring-derive = { version = "0.1" }
+wiring-derive = { version = "0.2"}
+criterion = "0.5.1"
+bencher = "0.1.5"
+simdutf8 = "0.1.4"
+
+[dev-dependencies]
+rand = "0.8"
+
+[[bench]]
+name = "benches"
+harness = false
+lto = true
+
+[profile.release]
+lto = true
+
+[profile.bench]
+lto = true

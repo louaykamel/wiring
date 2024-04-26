@@ -20,7 +20,7 @@ Wiring provides a procedural macros `Wiring, Unwiring` to facilitate the automat
 #[derive(Wiring, Unwiring)]
 #[tag(u8)]
 enum MyEnum {
-    VariantOne,
+    VariantOne { reply: tokio::sync::oneshot::Sender<()>, request: String, },
     VariantN,
 }
 ```
@@ -39,9 +39,9 @@ To include Wiring in your Rust project, add the following to your `Cargo.toml` f
 
 ```toml
 [dependencies]
-wiring = "0.1"
+wiring = "0.2"
 ```
-Check [examples](examples) folder.
+Check [https://github.com/louaykamel/wiring/tree/master/examples](examples) folder.
 
 
 ## Contributing
@@ -50,7 +50,7 @@ Contributions to Wiring are welcome! Please read our contributing guidelines to 
 
 ## License
 
-Wiring is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Wiring is licensed under the Apache 2.0 License - see the [https://github.com/louaykamel/wiring/blob/master/LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 

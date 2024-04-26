@@ -35,7 +35,6 @@ async fn client(connect_info: ConnectInfo) {
         .connect(&connect_info)
         .await
         .expect("Wireconfig to connect");
-
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
 
     client_wire.wire(tx).await.expect("Client wire to wire sender");
