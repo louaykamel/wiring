@@ -1,6 +1,6 @@
 [package]
 name = "wiring"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 authors = ["Louay Kamel"]
 license-file = "LICENSE"
@@ -18,7 +18,7 @@ url = "2.5"
 pin-project = "1.1"
 tokio-stream = {version = "0.1", features = ["sync"]}
 
-wiring-derive = { version = "0.2"}
+wiring-derive = { version = "0.2" }
 criterion = "0.5.1"
 bencher = "0.1.5"
 simdutf8 = "0.1.4"
