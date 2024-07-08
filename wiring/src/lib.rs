@@ -1,9 +1,11 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
-#![feature(slice_flatten)]
+//#![feature(generic_const_exprs)]
 #![feature(test)]
 
 mod core;
+
+#[allow(dead_code)]
 mod test;
 
 pub mod prelude {

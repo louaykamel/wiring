@@ -1777,7 +1777,7 @@ impl Wiring for u32 {
         // we inilize the t_be_bytes for the array and do it in one go?
         let c = array.map(|n| n.to_be_bytes());
         // instead we concat them
-        let r = c.as_slice().flatten();
+        let r = c.as_slice().as_flattened();
         wire.sync_wire_all::<true>(r)?;
         Ok(())
     }

@@ -1,6 +1,6 @@
 [package]
 name = "wiring"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Louay Kamel"]
 license-file = "LICENSE"
@@ -25,6 +25,10 @@ simdutf8 = "0.1.4"
 
 [dev-dependencies]
 rand = "0.8"
+
+[features]
+default = []
+generic_const_exprs = []
 
 [[bench]]
 name = "benches"
