@@ -893,6 +893,7 @@ fn get_tag(attrs: &Vec<syn::Attribute>, len: usize) -> proc_macro2::TokenStream 
 
 #[proc_macro_derive(Unwiring, attributes(tag))]
 pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    use quote::quote;
     use syn::{parse_macro_input, Data, DeriveInput, Variant};
     let input = parse_macro_input!(input as DeriveInput);
     let ident = input.ident;
@@ -910,6 +911,8 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
     }
     let (impl_g, ty_g, wh_g) = g.split_for_impl();
 
+    let mut fixed_size_tokens = proc_macro2::TokenStream::new();
+
     match data {
         Data::Struct(data) => match data.fields {
             syn::Fields::Named(fields) => {
@@ -925,10 +928,29 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
                 let mixed_check = quote::quote! {
                     false #(|| #mixed_tokens)*
                 };
+
+                for field in named.iter() {
+                    let field_type = field.ty.clone();
+                    let tokens = quote! {
+                        + <#field_type as wiring::prelude::Unwiring>::FIXED_SIZE
+                    };
+
+                    fixed_size_tokens.extend(tokens);
+                }
+
+                let s = fixed_size_tokens.to_string();
+                let s = s.trim();
+                let s = s.char_indices().nth(1).map(|(i, _)| &s[i..]).unwrap_or("");
+                fixed_size_tokens = s
+                    .parse::<proc_macro2::TokenStream>()
+                    .expect("Failed to parse back to TokenStream");
+
                 let expaned = quote::quote! {
 
                     impl #impl_g Unwiring for #ident #ty_g #wh_g {
+                        const FIXED_SIZE: usize = #fixed_size_tokens;
                         const MIXED: bool = #mixed_check;
+
                         #[inline]
                         fn unwiring<W: wiring::prelude::Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
                             async move {
@@ -982,9 +1004,26 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
                     false #(|| #mixed_tokens)*
                 };
 
+                for field in unamed.iter() {
+                    let field_type = field.ty.clone();
+                    let tokens = quote! {
+                        + <#field_type as wiring::prelude::Unwiring>::FIXED_SIZE
+                    };
+
+                    fixed_size_tokens.extend(tokens);
+                }
+
+                let s = fixed_size_tokens.to_string();
+                let s = s.trim();
+                let s = s.char_indices().nth(1).map(|(i, _)| &s[i..]).unwrap_or("");
+                fixed_size_tokens = s
+                    .parse::<proc_macro2::TokenStream>()
+                    .expect("Failed to parse back to TokenStream");
+
                 let expaned = quote::quote! {
 
                     impl #impl_g Unwiring for #ident #ty_g #wh_g {
+                        const FIXED_SIZE: usize = #fixed_size_tokens;
                         const MIXED: bool = #mixed_check;
                         #[inline]
                         fn unwiring<W: wiring::prelude::Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -1029,6 +1068,8 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
             syn::Fields::Unit => {
                 let expaned = quote::quote! {
                     impl Unwiring for #ident {
+                        const FIXED_SIZE: usize = 1;
+                        const MIXED: bool = false;
                         #[inline]
                         fn unwiring<W: wiring::prelude::Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
                             async move {
@@ -1066,6 +1107,15 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
                 .enumerate()
                 .map(|(index, Variant { ident, fields, .. })| match fields {
                     syn::Fields::Named(named) => {
+                        for field in named.named.iter() {
+                            let field_type = field.ty.clone();
+                            let tokens = quote! {
+                                + <#field_type as wiring::prelude::Unwiring>::FIXED_SIZE
+                            };
+
+                            fixed_size_tokens.extend(tokens);
+                        }
+
                         let n_field = named.named.iter().map(|n| &n.ident);
                         quote::quote! {
                              #index => {
@@ -1076,6 +1126,15 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     }
                     syn::Fields::Unnamed(unamed) => {
+                        for field in unamed.unnamed.iter() {
+                            let field_type = field.ty.clone();
+                            let tokens = quote! {
+                                + <#field_type as wiring::prelude::Unwiring>::FIXED_SIZE
+                            };
+
+                            fixed_size_tokens.extend(tokens);
+                        }
+
                         let n_ty = unamed.unnamed.iter().map(|n| &n.ty);
                         quote::quote! {
                             #index => {
@@ -1162,7 +1221,6 @@ pub fn unwiring_proc_macro(input: proc_macro::TokenStream) -> proc_macro::TokenS
             let expanded = quote::quote! {
 
                 impl #impl_g Unwiring for #ident #ty_g #wh_g {
-
                     #[inline]
                     fn unwiring<W: wiring::prelude::Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
                         async move {

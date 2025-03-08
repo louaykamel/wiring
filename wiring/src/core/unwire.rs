@@ -168,7 +168,7 @@ impl<'a> UnsafeReader<'a> {
     #[inline(always)]
     pub unsafe fn unwire_u64(&mut self) -> u64 {
         let value_ptr = self.as_ptr().add(self.position) as *const u64;
-        let value: u64 = u64::from_be(*value_ptr);
+        let value: u64 = u64::from_be(value_ptr.read());
         self.position += 8;
         value
     }
@@ -443,6 +443,7 @@ where
 }
 
 pub trait Unwiring: Sized + Send + Sync {
+    const FIXED_SIZE: usize = 0;
     const MIXED: bool = true;
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send;
     #[allow(unused)]
@@ -863,6 +864,7 @@ impl Unwiring for bool {
 }
 
 impl Unwiring for u8 {
+    const FIXED_SIZE: usize = 1;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -878,6 +880,7 @@ impl Unwiring for u8 {
 }
 
 impl Unwiring for i8 {
+    const FIXED_SIZE: usize = 1;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -893,6 +896,7 @@ impl Unwiring for i8 {
 }
 
 impl Unwiring for u16 {
+    const FIXED_SIZE: usize = 2;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -908,6 +912,7 @@ impl Unwiring for u16 {
 }
 
 impl Unwiring for i16 {
+    const FIXED_SIZE: usize = 2;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -923,6 +928,7 @@ impl Unwiring for i16 {
 }
 
 impl Unwiring for u32 {
+    const FIXED_SIZE: usize = 4;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -938,6 +944,7 @@ impl Unwiring for u32 {
 }
 
 impl Unwiring for i32 {
+    const FIXED_SIZE: usize = 4;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -968,6 +975,7 @@ impl Unwiring for f32 {
 }
 
 impl Unwiring for u64 {
+    const FIXED_SIZE: usize = 8;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -983,6 +991,7 @@ impl Unwiring for u64 {
 }
 
 impl Unwiring for i64 {
+    const FIXED_SIZE: usize = 8;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -1015,6 +1024,7 @@ impl Unwiring for f64 {
 }
 
 impl Unwiring for u128 {
+    const FIXED_SIZE: usize = 16;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -1036,6 +1046,7 @@ impl Unwiring for u128 {
 }
 
 impl Unwiring for i128 {
+    const FIXED_SIZE: usize = 16;
     const MIXED: bool = false;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -1109,6 +1120,8 @@ impl Unwiring for Url {
 }
 
 impl<T: Unwiring + 'static, const LEN: usize> Unwiring for [T; LEN] {
+    const FIXED_SIZE: usize = T::FIXED_SIZE * LEN;
+    const MIXED: bool = T::MIXED;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
         T::unwiring_array::<_, LEN>(wire)
@@ -1219,11 +1232,12 @@ impl<T: Unwiring> Unwiring for Vec<T> {
     {
         // if all fixed, such as triangle or whatever, we set it to be tru
         let mut total_bytes_len = size_of::<u64>() as u64 * count;
+
         for _ in 0..count {
             let this_count = wire.sync_unwire_u64()?;
             // check if type is FIXED
             if !T::MIXED {
-                let len = std::mem::size_of::<T>() as u64 * this_count;
+                let len = T::FIXED_SIZE as u64 * this_count;
                 total_bytes_len += len;
                 wire.advance_position(len)?;
             } else {
@@ -1422,6 +1436,7 @@ impl<T: Unwiring> Unwiring for Option<T> {
 }
 
 impl<T: Unwiring, TT: Unwiring> Unwiring for (T, TT) {
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE;
     const MIXED: bool = T::MIXED && TT::MIXED;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
@@ -1449,6 +1464,7 @@ impl<T: Unwiring, TT: Unwiring> Unwiring for (T, TT) {
 }
 
 impl<T: Unwiring, TT: Unwiring, T3: Unwiring> Unwiring for (T, TT, T3) {
+    const FIXED_SIZE: usize = T::FIXED_SIZE + TT::FIXED_SIZE + T3::FIXED_SIZE;
     const MIXED: bool = T::MIXED && TT::MIXED && T3::MIXED;
     #[inline]
     fn unwiring<W: Unwire>(wire: &mut W) -> impl std::future::Future<Output = Result<Self, std::io::Error>> + Send {
