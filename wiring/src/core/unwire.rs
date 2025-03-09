@@ -168,7 +168,7 @@ impl<'a> UnsafeReader<'a> {
     #[inline(always)]
     pub unsafe fn unwire_u64(&mut self) -> u64 {
         let value_ptr = self.as_ptr().add(self.position) as *const u64;
-        let value: u64 = u64::from_be(value_ptr.read());
+        let value: u64 = u64::from_be(value_ptr.read_unaligned());
         self.position += 8;
         value
     }
@@ -177,27 +177,27 @@ impl<'a> UnsafeReader<'a> {
     pub unsafe fn unwire_f32(&mut self) -> f32 {
         let value_ptr = self.as_ptr().add(self.position) as *const u32;
         self.position += std::mem::size_of::<f32>();
-        f32::from_bits(u32::from_be(value_ptr.read()))
+        f32::from_bits(u32::from_be(value_ptr.read_unaligned()))
     }
     #[inline(always)]
     unsafe fn unwire_u32(&mut self) -> u32 {
         let value_ptr = self.as_ptr().add(self.position) as *const u32;
-        let value = u32::from_be(value_ptr.read());
+        let value = u32::from_be(value_ptr.read_unaligned());
         self.position += std::mem::size_of::<u32>();
         value
     }
 
     #[inline(always)]
     unsafe fn unwire_u8(&mut self) -> u8 {
-        let value_ptr = self.as_ptr().add(self.position).read();
+        let value_ptr = self.as_ptr().add(self.position).read_unaligned();
         self.position += std::mem::size_of::<u8>();
         value_ptr
     }
     #[inline(always)]
     unsafe fn unwire_u16(&mut self) -> u16 {
         let value = u16::from_be_bytes([
-            self.as_ptr().add(self.position).read(),
-            self.as_ptr().add(self.position + 1).read(),
+            self.as_ptr().add(self.position).read_unaligned(),
+            self.as_ptr().add(self.position + 1).read_unaligned(),
         ]);
         self.position += std::mem::size_of::<u16>();
         value
@@ -212,7 +212,7 @@ impl<'a> UnsafeReader<'a> {
     unsafe fn unwire_exact<const N: usize>(&mut self) -> [u8; N] {
         let value_ptr = self.as_ptr().add(self.position) as *const [u8; N];
         self.position += N;
-        value_ptr.read()
+        value_ptr.read_unaligned()
     }
 }
 
@@ -507,7 +507,8 @@ pub trait Unwiring: Sized + Send + Sync {
             array: Option<[MaybeUninit<T>; N]>,
             initialized_count: usize,
         }
-        let data: [MaybeUninit<Self>; N] = MaybeUninit::uninit_array();
+        let data: [MaybeUninit<Self>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+        
         let mut v = SafeInitArray {
             array: data.into(),
             initialized_count: 0,
